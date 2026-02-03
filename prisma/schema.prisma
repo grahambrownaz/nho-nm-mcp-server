@@ -1,0 +1,238 @@
+// NHO/NM MCP Server Database Schema
+// Manages tenants, subscriptions, usage tracking, and data access
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================================
+// TENANT MANAGEMENT
+// ============================================================================
+
+model Tenant {
+  id          String   @id @default(uuid())
+  name        String
+  email       String   @unique
+  company     String?
+  phone       String?
+  status      TenantStatus @default(ACTIVE)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Relations
+  apiKeys       ApiKey[]
+  subscriptions Subscription[]
+  usageRecords  UsageRecord[]
+  dataPulls     DataPull[]
+
+  @@map("tenants")
+}
+
+enum TenantStatus {
+  ACTIVE
+  SUSPENDED
+  CANCELLED
+  PENDING
+}
+
+// ============================================================================
+// AUTHENTICATION
+// ============================================================================
+
+model ApiKey {
+  id          String   @id @default(uuid())
+  key         String   @unique
+  name        String   // e.g., "Production Key", "Development Key"
+  tenantId    String
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  permissions String[] // e.g., ["data:read", "data:write", "subscription:read"]
+  isActive    Boolean  @default(true)
+  lastUsedAt  DateTime?
+  expiresAt   DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([key])
+  @@index([tenantId])
+  @@map("api_keys")
+}
+
+// ============================================================================
+// SUBSCRIPTIONS & BILLING
+// ============================================================================
+
+model Subscription {
+  id              String   @id @default(uuid())
+  tenantId        String
+  tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  plan            SubscriptionPlan
+  status          SubscriptionStatus @default(ACTIVE)
+
+  // Data allowances
+  monthlyRecordLimit    Int      @default(1000)
+  monthlyEmailAppends   Int      @default(500)
+  monthlyPhoneAppends   Int      @default(500)
+
+  // Geographic restrictions (null = all geographies)
+  allowedStates         String[] // Empty array = all states
+  allowedZipCodes       String[] // Empty array = all zips
+
+  // Database access
+  allowedDatabases      DatabaseType[] @default([NHO, NEW_MOVER])
+
+  // Pricing (overrides defaults)
+  pricePerRecord        Decimal? @db.Decimal(10, 4)
+  priceEmailAppend      Decimal? @db.Decimal(10, 4)
+  pricePhoneAppend      Decimal? @db.Decimal(10, 4)
+  pricePdfGeneration    Decimal? @db.Decimal(10, 4)
+
+  // Billing
+  billingCycleStart     DateTime
+  billingCycleEnd       DateTime
+
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  @@index([tenantId])
+  @@map("subscriptions")
+}
+
+enum SubscriptionPlan {
+  STARTER       // Basic access, limited records
+  PROFESSIONAL  // More records, all databases
+  ENTERPRISE    // Unlimited, custom pricing
+  TRIAL         // Free trial period
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  PAST_DUE
+  CANCELLED
+  PAUSED
+  TRIAL
+}
+
+enum DatabaseType {
+  NHO         // New Homeowner
+  NEW_MOVER   // New Mover
+  CONSUMER    // Consumer database
+  BUSINESS    // Business database
+}
+
+// ============================================================================
+// USAGE TRACKING
+// ============================================================================
+
+model UsageRecord {
+  id          String   @id @default(uuid())
+  tenantId    String
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  // What was used
+  usageType   UsageType
+  quantity    Int
+
+  // Cost calculation
+  unitPrice   Decimal  @db.Decimal(10, 4)
+  totalCost   Decimal  @db.Decimal(10, 2)
+
+  // Context
+  toolName    String   // e.g., "search_data", "get_sample_data"
+  database    DatabaseType?
+  geography   Json?    // The geography filter used
+
+  // Billing period
+  billingMonth DateTime
+
+  createdAt   DateTime @default(now())
+
+  @@index([tenantId])
+  @@index([billingMonth])
+  @@index([usageType])
+  @@map("usage_records")
+}
+
+enum UsageType {
+  DATA_RECORD
+  EMAIL_APPEND
+  PHONE_APPEND
+  PDF_GENERATION
+  PRINT_FULFILLMENT
+  SAMPLE_DATA      // Usually free
+  PREVIEW_COUNT    // Usually free
+}
+
+// ============================================================================
+// DATA PULLS (Audit Trail)
+// ============================================================================
+
+model DataPull {
+  id          String   @id @default(uuid())
+  tenantId    String
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  // Request details
+  database    DatabaseType
+  geography   Json     // { type: "zip", values: ["85001", "85002"] }
+  filters     Json?    // Demographic filters
+
+  // Results
+  recordCount Int
+  includeEmail Boolean @default(false)
+  includePhone Boolean @default(false)
+
+  // Status
+  status      DataPullStatus @default(COMPLETED)
+  errorMessage String?
+
+  // Timestamps
+  requestedAt DateTime @default(now())
+  completedAt DateTime?
+
+  @@index([tenantId])
+  @@index([requestedAt])
+  @@map("data_pulls")
+}
+
+enum DataPullStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+// ============================================================================
+// PRICING CONFIGURATION
+// ============================================================================
+
+model PricingTier {
+  id            String   @id @default(uuid())
+  name          String   // e.g., "Standard", "Volume", "Enterprise"
+
+  // Volume thresholds
+  minRecords    Int
+  maxRecords    Int?     // null = unlimited
+
+  // Prices per unit
+  pricePerRecord      Decimal @db.Decimal(10, 4)
+  priceEmailAppend    Decimal @db.Decimal(10, 4)
+  pricePhoneAppend    Decimal @db.Decimal(10, 4)
+  pricePdfGeneration  Decimal @db.Decimal(10, 4)
+  pricePrintPerPiece  Decimal @db.Decimal(10, 4)
+
+  // Effective dates
+  effectiveFrom DateTime @default(now())
+  effectiveTo   DateTime?
+
+  isActive      Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@map("pricing_tiers")
+}
