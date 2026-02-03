@@ -221,15 +221,20 @@ function generateMockRecord(
 
 export class LeadsPleaseApiService {
   // Reserved for real API implementation
-  private _apiUrl: string;
   private _apiKey: string;
   private useMockData: boolean;
 
   constructor() {
-    this._apiUrl = LEADSPLEASE_API_URL;
     this._apiKey = LEADSPLEASE_API_KEY;
     // Use mock data if no API key is configured
     this.useMockData = !this._apiKey || this._apiKey === 'your-leadsplease-api-key';
+  }
+
+  /**
+   * Get the API URL (for future real API implementation)
+   */
+  protected getApiUrl(): string {
+    return LEADSPLEASE_API_URL;
   }
 
   /**

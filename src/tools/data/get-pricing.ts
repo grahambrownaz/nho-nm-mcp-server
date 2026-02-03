@@ -166,7 +166,7 @@ export async function executeGetPricing(
   let databases = DATABASE_INFO;
   if (params?.database) {
     databases = {
-      [params.database]: DATABASE_INFO[params.database as keyof typeof DATABASE_INFO],
+      [params.database]: DATABASE_INFO[params.database],
     } as typeof DATABASE_INFO;
   }
 

@@ -25,22 +25,137 @@ import {
   executeGetSampleData,
   getPricingTool,
   executeGetPricing,
+  getFilterOptionsTool,
+  executeGetFilterOptions,
 } from './tools/data/index.js';
+
+// Subscription tools
+import {
+  createSubscriptionTool,
+  executeCreateSubscription,
+  manageSubscriptionTool,
+  executeManageSubscription,
+  listSubscriptionsTool,
+  executeListSubscriptions,
+  deliveryReportTool,
+  executeDeliveryReport,
+} from './tools/subscriptions/index.js';
+
+// Template tools
+import {
+  uploadTemplateTool,
+  executeUploadTemplate,
+  browseTemplatesTool,
+  executeBrowseTemplates,
+  importDesignTool,
+  executeImportDesign,
+  generatePostcardPdfTool,
+  executeGeneratePostcardPdf,
+} from './tools/templates/index.js';
+
+// Delivery tools (Week 3)
+import {
+  configureDeliveryTool,
+  executeConfigureDelivery,
+  getFulfillmentStatusTool,
+  executeGetFulfillmentStatus,
+} from './tools/delivery/index.js';
+
+// Billing tools (Week 4)
+import {
+  createCheckoutSessionTool,
+  executeCreateCheckoutSession,
+  getBillingStatusTool,
+  executeGetBillingStatus,
+  getBillingPortalTool,
+  executeGetBillingPortal,
+  createPaymentLinkTool,
+  executeCreatePaymentLink,
+} from './tools/billing/index.js';
+
+// Purchase tools (Week 6)
+import {
+  purchaseListTool,
+  executePurchaseList,
+} from './tools/purchases/index.js';
+
+// Export tools (Week 6)
+import {
+  exportDataTool,
+  executeExportData,
+} from './tools/exports/index.js';
+
+// Platform tools (Week 5)
+import {
+  syncToPlatformTool,
+  executeSyncToPlatform,
+  configurePlatformConnectionTool,
+  executeConfigurePlatformConnection,
+} from './tools/platforms/index.js';
+
+// Intent tools (Week 6)
+import {
+  searchIntentDataTool,
+  executeSearchIntentData,
+  createIntentSubscriptionTool,
+  executeCreateIntentSubscription,
+  listIntentCategoriesTool,
+  executeListIntentCategories,
+  configureIntentWebhookTool,
+  executeConfigureIntentWebhook,
+} from './tools/intent/index.js';
+
+// Scheduler (Week 3 - updated)
+import { startScheduler, stopScheduler } from './cron/scheduler.js';
+
+// Print API initialization
+import { initializePrintApiProviders } from './services/print-api/index.js';
 
 /**
  * Server configuration
  */
 const SERVER_NAME = process.env.MCP_SERVER_NAME || 'nho-nm-mcp-server';
-const SERVER_VERSION = process.env.MCP_SERVER_VERSION || '1.0.0';
+const SERVER_VERSION = process.env.MCP_SERVER_VERSION || '1.2.0';
 
 /**
  * All available tools
  */
 const TOOLS = [
+  // Data tools (Week 1)
   searchDataTool,
   previewCountTool,
   getSampleDataTool,
   getPricingTool,
+  // Subscription tools (Week 2)
+  createSubscriptionTool,
+  manageSubscriptionTool,
+  listSubscriptionsTool,
+  deliveryReportTool,
+  // Template tools (Week 2)
+  uploadTemplateTool,
+  browseTemplatesTool,
+  importDesignTool,
+  generatePostcardPdfTool,
+  // Delivery tools (Week 3)
+  configureDeliveryTool,
+  getFulfillmentStatusTool,
+  // Billing tools (Week 4)
+  createCheckoutSessionTool,
+  getBillingStatusTool,
+  getBillingPortalTool,
+  // Platform tools (Week 5)
+  syncToPlatformTool,
+  configurePlatformConnectionTool,
+  // Week 6 tools
+  getFilterOptionsTool,
+  purchaseListTool,
+  exportDataTool,
+  createPaymentLinkTool,
+  // Intent tools (Week 6)
+  searchIntentDataTool,
+  createIntentSubscriptionTool,
+  listIntentCategoriesTool,
+  configureIntentWebhookTool,
 ];
 
 /**
@@ -50,10 +165,41 @@ const TOOL_EXECUTORS: Record<
   string,
   (input: unknown, context: TenantContext) => Promise<unknown>
 > = {
+  // Data tools (Week 1)
   search_data: executeSearchData,
   preview_count: executePreviewCount,
   get_sample_data: executeGetSampleData,
   get_pricing: executeGetPricing,
+  // Subscription tools (Week 2)
+  create_subscription: executeCreateSubscription,
+  manage_subscription: executeManageSubscription,
+  list_subscriptions: executeListSubscriptions,
+  delivery_report: executeDeliveryReport,
+  // Template tools (Week 2)
+  upload_template: executeUploadTemplate,
+  browse_templates: executeBrowseTemplates,
+  import_design: executeImportDesign,
+  generate_postcard_pdf: executeGeneratePostcardPdf,
+  // Delivery tools (Week 3)
+  configure_delivery: executeConfigureDelivery,
+  get_fulfillment_status: executeGetFulfillmentStatus,
+  // Billing tools (Week 4)
+  create_checkout_session: executeCreateCheckoutSession,
+  get_billing_status: executeGetBillingStatus,
+  get_billing_portal: executeGetBillingPortal,
+  // Platform tools (Week 5)
+  sync_to_platform: executeSyncToPlatform,
+  configure_platform_connection: executeConfigurePlatformConnection,
+  // Week 6 tools
+  get_filter_options: executeGetFilterOptions,
+  purchase_list: executePurchaseList,
+  export_data: executeExportData,
+  create_payment_link: executeCreatePaymentLink,
+  // Intent tools (Week 6)
+  search_intent_data: executeSearchIntentData,
+  create_intent_subscription: executeCreateIntentSubscription,
+  list_intent_categories: executeListIntentCategories,
+  configure_intent_webhook: executeConfigureIntentWebhook,
 };
 
 /**
@@ -164,6 +310,10 @@ function createTestContext(): TenantContext {
       company: 'Test Company',
       phone: null,
       status: 'ACTIVE',
+      stripeCustomerId: null,
+      parentTenantId: null,
+      isReseller: false,
+      wholesalePricing: null,
       createdAt: new Date(),
       updatedAt: new Date(),
     },
@@ -184,16 +334,17 @@ function createTestContext(): TenantContext {
       tenantId: 'test-tenant-id',
       plan: 'PROFESSIONAL',
       status: 'ACTIVE',
+      stripeSubscriptionId: null,
       monthlyRecordLimit: 10000,
       monthlyEmailAppends: 5000,
       monthlyPhoneAppends: 5000,
       allowedStates: [],
       allowedZipCodes: [],
-      allowedDatabases: ['NHO', 'NEW_MOVER', 'CONSUMER', 'BUSINESS'],
-      pricePerRecord: null,
-      priceEmailAppend: null,
-      pricePhoneAppend: null,
-      pricePdfGeneration: null,
+      allowedDatabases: ['NHO', 'NEW_MOVER', 'CONSUMER', 'BUSINESS', 'INTENT'],
+      pricePerRecord: { toNumber: () => 0.05 } as unknown as import('@prisma/client').Prisma.Decimal,
+      priceEmailAppend: { toNumber: () => 0.02 } as unknown as import('@prisma/client').Prisma.Decimal,
+      pricePhoneAppend: { toNumber: () => 0.03 } as unknown as import('@prisma/client').Prisma.Decimal,
+      pricePdfGeneration: { toNumber: () => 0.02 } as unknown as import('@prisma/client').Prisma.Decimal,
       billingCycleStart: new Date(),
       billingCycleEnd: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
       createdAt: new Date(),
@@ -212,6 +363,20 @@ export async function startServer(): Promise<void> {
 
   console.error(`Starting ${SERVER_NAME} v${SERVER_VERSION}...`);
 
+  // Initialize print API providers
+  initializePrintApiProviders();
+
+  // Start the delivery scheduler (if enabled)
+  const enableScheduler = process.env.ENABLE_SCHEDULER !== 'false';
+  if (enableScheduler) {
+    startScheduler({
+      enabled: true,
+      timezone: process.env.SCHEDULER_TIMEZONE || 'America/New_York',
+      deliveryHour: parseInt(process.env.SCHEDULER_HOUR || '6', 10),
+    });
+    console.error('Delivery scheduler started');
+  }
+
   await server.connect(transport);
 
   console.error('Server connected and ready');
@@ -219,12 +384,14 @@ export async function startServer(): Promise<void> {
   // Handle shutdown
   process.on('SIGINT', async () => {
     console.error('Shutting down server...');
+    stopScheduler();
     await server.close();
     process.exit(0);
   });
 
   process.on('SIGTERM', async () => {
     console.error('Shutting down server...');
+    stopScheduler();
     await server.close();
     process.exit(0);
   });

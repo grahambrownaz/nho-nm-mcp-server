@@ -24,12 +24,28 @@ model Tenant {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  // Relations
-  apiKeys       ApiKey[]
-  subscriptions Subscription[]
-  usageRecords  UsageRecord[]
-  dataPulls     DataPull[]
+  // Stripe integration
+  stripeCustomerId  String?  @unique
 
+  // Reseller Mode (Path C)
+  parentTenantId    String?
+  parentTenant      Tenant?  @relation("TenantHierarchy", fields: [parentTenantId], references: [id])
+  subTenants        Tenant[] @relation("TenantHierarchy")
+  isReseller        Boolean  @default(false)
+  wholesalePricing  Json?    // Custom pricing for reseller { pricePerRecord, priceEmailAppend, etc. }
+
+  // Relations
+  apiKeys           ApiKey[]
+  subscriptions     Subscription[]
+  usageRecords      UsageRecord[]
+  dataPulls         DataPull[]
+  dataSubscriptions DataSubscription[]
+  templates         Template[]
+  listPurchases     ListPurchase[]
+  intentSubscriptions IntentSubscription[]
+  intentWebhooks    IntentWebhook[]
+
+  @@index([parentTenantId])
   @@map("tenants")
 }
 
@@ -72,6 +88,9 @@ model Subscription {
   tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   plan            SubscriptionPlan
   status          SubscriptionStatus @default(ACTIVE)
+
+  // Stripe integration
+  stripeSubscriptionId  String?  @unique
 
   // Data allowances
   monthlyRecordLimit    Int      @default(1000)
@@ -122,6 +141,7 @@ enum DatabaseType {
   NEW_MOVER   // New Mover
   CONSUMER    // Consumer database
   BUSINESS    // Business database
+  INTENT      // Intent/purchase signals
 }
 
 // ============================================================================
@@ -235,4 +255,628 @@ model PricingTier {
   updatedAt     DateTime @updatedAt
 
   @@map("pricing_tiers")
+}
+
+// ============================================================================
+// DATA SUBSCRIPTIONS (Recurring Data Delivery)
+// ============================================================================
+
+model DataSubscription {
+  id              String   @id @default(uuid())
+  tenantId        String
+  tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  // Subscription name and client info
+  name            String
+  clientName      String?   // End client name if reselling
+  clientEmail     String?
+  clientPhone     String?
+
+  // Data criteria
+  database        DatabaseType
+  geography       Json      // { type: "zip", values: [...] }
+  filters         Json?     // Demographic filters
+
+  // Delivery schedule
+  frequency       DeliveryFrequency
+  nextDeliveryAt  DateTime
+  lastDeliveryAt  DateTime?
+
+  // Template and fulfillment
+  templateId      String?
+  template        Template? @relation(fields: [templateId], references: [id])
+  fulfillmentMethod FulfillmentMethod @default(DOWNLOAD)
+  fulfillmentConfig Json?   // e.g., { printer_id, mail_class, return_address }
+
+  // Sync/integration channels
+  syncChannels    Json?     // e.g., [{ type: "webhook", url: "..." }, { type: "email", address: "..." }]
+
+  // Status
+  status          DataSubscriptionStatus @default(ACTIVE)
+  pausedAt        DateTime?
+  cancelledAt     DateTime?
+
+  // Stats
+  totalDeliveries Int      @default(0)
+  totalRecords    Int      @default(0)
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  // Relations
+  deliveries      Delivery[]
+
+  @@index([tenantId])
+  @@index([status])
+  @@index([nextDeliveryAt])
+  @@map("data_subscriptions")
+}
+
+enum DeliveryFrequency {
+  DAILY
+  WEEKLY
+  BIWEEKLY
+  MONTHLY
+}
+
+enum FulfillmentMethod {
+  DOWNLOAD      // PDF/CSV download
+  EMAIL         // Email delivery
+  PRINT_MAIL    // Print and mail postcards
+  WEBHOOK       // Send to webhook
+  FTP           // Upload to FTP
+}
+
+enum DataSubscriptionStatus {
+  ACTIVE
+  PAUSED
+  CANCELLED
+  COMPLETED
+}
+
+// ============================================================================
+// DELIVERIES (Delivery History)
+// ============================================================================
+
+model Delivery {
+  id                  String   @id @default(uuid())
+  dataSubscriptionId  String
+  dataSubscription    DataSubscription @relation(fields: [dataSubscriptionId], references: [id], onDelete: Cascade)
+  tenantId            String
+
+  // Delivery details
+  recordCount         Int
+  newRecordsCount     Int      // Records not seen in previous deliveries
+  duplicatesRemoved   Int      @default(0)
+
+  // Files generated
+  dataFileUrl         String?  // CSV/JSON file URL
+  pdfFileUrl          String?  // PDF file URL (if generated)
+
+  // Fulfillment status
+  fulfillmentStatus   FulfillmentStatus @default(PENDING)
+  fulfillmentDetails  Json?    // e.g., { tracking_number, mail_date }
+
+  // Costs
+  dataCost            Decimal  @db.Decimal(10, 2)
+  pdfCost             Decimal  @db.Decimal(10, 2) @default(0)
+  fulfillmentCost     Decimal  @db.Decimal(10, 2) @default(0)
+  totalCost           Decimal  @db.Decimal(10, 2)
+
+  // Timestamps
+  scheduledAt         DateTime
+  startedAt           DateTime?
+  completedAt         DateTime?
+
+  // Status
+  status              DeliveryStatus @default(PENDING)
+  errorMessage        String?
+
+  createdAt           DateTime @default(now())
+
+  @@index([dataSubscriptionId])
+  @@index([tenantId])
+  @@index([scheduledAt])
+  @@index([status])
+  @@map("deliveries")
+}
+
+enum DeliveryStatus {
+  PENDING
+  PROCESSING
+  GENERATING_PDF
+  FULFILLING
+  COMPLETED
+  FAILED
+}
+
+enum FulfillmentStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+  FAILED
+  NOT_APPLICABLE
+}
+
+// ============================================================================
+// TEMPLATES (Postcard/Letter Templates)
+// ============================================================================
+
+model Template {
+  id              String   @id @default(uuid())
+  tenantId        String?  // null = system template
+  tenant          Tenant?  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  // Template info
+  name            String
+  description     String?
+  category        TemplateCategory
+  size            PostcardSize
+
+  // Content
+  htmlFront       String   @db.Text
+  htmlBack        String?  @db.Text
+  cssStyles       String?  @db.Text
+
+  // Merge fields detected
+  mergeFields     String[] // e.g., ["first_name", "last_name", "address"]
+
+  // Preview
+  thumbnailUrl    String?
+  previewPdfUrl   String?
+
+  // Visibility
+  isPublic        Boolean  @default(false)  // Available to all tenants
+  isActive        Boolean  @default(true)
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  // Relations
+  dataSubscriptions DataSubscription[]
+
+  @@index([tenantId])
+  @@index([category])
+  @@index([isPublic])
+  @@map("templates")
+}
+
+enum TemplateCategory {
+  REALTOR
+  HVAC
+  INSURANCE
+  LANDSCAPING
+  HOME_SERVICES
+  RETAIL
+  GENERAL
+  CUSTOM
+}
+
+enum PostcardSize {
+  SIZE_4X6    // 4" x 6"
+  SIZE_6X9    // 6" x 9"
+  SIZE_6X11   // 6" x 11"
+}
+
+// ============================================================================
+// DELIVERY CONFIGURATION
+// ============================================================================
+
+model DeliveryConfig {
+  id              String   @id @default(uuid())
+  tenantId        String
+
+  // Configuration name
+  name            String
+  isDefault       Boolean  @default(false)
+
+  // Delivery method
+  method          DeliveryMethod
+
+  // SFTP configuration (encrypted)
+  sftpHost        String?
+  sftpPort        Int?     @default(22)
+  sftpUsername    String?
+  sftpPassword    String?  // Encrypted
+  sftpPrivateKey  String?  @db.Text // Encrypted
+  sftpFolderPath  String?
+
+  // JDF configuration
+  includeJdf      Boolean  @default(false)
+  jdfPreset       String?  // e.g., "4x6_100lb_gloss_fc"
+
+  // Email configuration
+  emailAddress    String?
+
+  // Webhook configuration
+  webhookUrl      String?
+  webhookHeaders  Json?
+
+  // Cloud storage configuration
+  cloudProvider   String?  // s3, gcs, azure
+  cloudBucket     String?
+  cloudPath       String?
+  cloudCredentials String? @db.Text // Encrypted
+
+  // Print API configuration
+  printApiProvider  String?   // 'reminder_media', 'lob', 'stannp', 'postgrid'
+  printApiKey       String?   @db.Text // Encrypted
+  printApiSettings  Json?     // Provider-specific settings
+
+  // Connection status
+  lastTestAt      DateTime?
+  lastTestSuccess Boolean?
+  lastTestError   String?
+
+  // Status
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([tenantId])
+  @@index([method])
+  @@map("delivery_configs")
+}
+
+enum DeliveryMethod {
+  SFTP_HOT_FOLDER
+  PRINT_API
+  EMAIL
+  WEBHOOK
+  CLOUD_STORAGE
+}
+
+// ============================================================================
+// DELIVERY RECORDS (Individual Records Delivered - for deduplication)
+// ============================================================================
+
+model DeliveryRecord {
+  id              String   @id @default(uuid())
+  deliveryId      String
+  tenantId        String
+  subscriptionId  String
+
+  // Record identification (for deduplication)
+  recordHash      String   // Hash of normalized address + last_name
+
+  // Original record data
+  firstName       String?
+  lastName        String?
+  address         String
+  city            String
+  state           String
+  zip             String
+
+  // Source data
+  database        DatabaseType
+  moveDate        DateTime?
+
+  // Delivery timestamp
+  deliveredAt     DateTime @default(now())
+
+  @@index([tenantId, recordHash])
+  @@index([subscriptionId, recordHash])
+  @@index([deliveredAt])
+  @@map("delivery_records")
+}
+
+// ============================================================================
+// LIST PURCHASES (One-time data purchases)
+// ============================================================================
+
+model ListPurchase {
+  id                    String   @id @default(uuid())
+  tenantId              String
+  tenant                Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  // Query criteria
+  database              String
+  geography             Json
+  filters               Json?
+
+  // Record counts
+  recordCount           Int
+  withEmail             Int      @default(0)
+  withPhone             Int      @default(0)
+
+  // Pricing
+  baseAmount            Decimal  @db.Decimal(10, 2)
+  appendAmount          Decimal  @default(0) @db.Decimal(10, 2)
+  discountPercent       Int      @default(0)
+  totalAmount           Decimal  @db.Decimal(10, 2)
+
+  // Stripe payment
+  stripePaymentLinkId   String?
+  stripePaymentIntentId String?
+  stripeReceiptUrl      String?
+  paymentStatus         PaymentStatus @default(PENDING)
+
+  // Export configuration
+  exportFormat          String
+  deliveryMethod        String
+  deliveryConfig        Json?
+
+  // Download
+  downloadUrl           String?
+  downloadExpires       DateTime?
+  deliveredAt           DateTime?
+
+  // Quote validity
+  quoteValidUntil       DateTime?
+
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  // Relations
+  exports               ExportFile[]
+
+  @@index([tenantId])
+  @@index([paymentStatus])
+  @@index([createdAt])
+  @@map("list_purchases")
+}
+
+enum PaymentStatus {
+  PENDING
+  AWAITING_PAYMENT
+  PROCESSING
+  COMPLETED
+  FAILED
+  EXPIRED
+  REFUNDED
+}
+
+// ============================================================================
+// EXPORT FILES (Generated data exports)
+// ============================================================================
+
+model ExportFile {
+  id                String   @id @default(uuid())
+  tenantId          String
+
+  // Source information
+  sourceType        String   // 'list_purchase', 'delivery', 'subscription', 'query'
+  sourceId          String
+
+  // File details
+  format            String   // 'csv', 'excel', 'json'
+  s3Key             String
+  fileSizeBytes     Int
+  recordCount       Int
+  columns           Json?    // Array of column names included
+
+  // Download access
+  downloadUrl       String?
+  downloadExpires   DateTime?
+  downloadCount     Int      @default(0)
+
+  createdAt         DateTime @default(now())
+
+  // Relations
+  listPurchase      ListPurchase? @relation(fields: [listPurchaseId], references: [id])
+  listPurchaseId    String?
+
+  @@index([tenantId])
+  @@index([sourceType, sourceId])
+  @@index([createdAt])
+  @@map("export_files")
+}
+
+// ============================================================================
+// INTENT DATA (Purchase Intent Signals - Subscription Only)
+// ============================================================================
+
+model IntentCategory {
+  id              String   @id @default(uuid())
+
+  // Category identification
+  code            String   @unique  // e.g., "auto_purchase", "home_improvement"
+  name            String            // e.g., "Auto Purchase Intent"
+  description     String?
+
+  // Parent category (for hierarchy)
+  parentId        String?
+  parent          IntentCategory?  @relation("CategoryHierarchy", fields: [parentId], references: [id])
+  children        IntentCategory[] @relation("CategoryHierarchy")
+
+  // Pricing (subscription only)
+  monthlyBasePrice    Decimal  @db.Decimal(10, 2)  // Base monthly subscription price
+  pricePerSignal      Decimal  @db.Decimal(10, 4)  // Price per intent signal
+
+  // Signal volume estimates
+  avgMonthlySignals   Int      @default(0)
+
+  // Data fields available
+  availableFields     String[] // e.g., ["email", "phone", "address", "intent_score"]
+
+  // Status
+  isActive            Boolean  @default(true)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  // Relations
+  subscriptions       IntentSubscription[]
+
+  @@index([parentId])
+  @@index([isActive])
+  @@map("intent_categories")
+}
+
+model IntentSubscription {
+  id              String   @id @default(uuid())
+  tenantId        String
+  tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  // Subscription name
+  name            String
+
+  // Intent categories subscribed to
+  categoryIds     String[]
+  categories      IntentCategory[]
+
+  // Geographic targeting
+  geography       Json?     // { type: "state", values: ["CA", "TX"] }
+
+  // Signal filters
+  minIntentScore  Int?      // Minimum intent score (1-100)
+  maxAgeHours     Int?      // Maximum signal age in hours
+
+  // Delivery configuration
+  deliveryMethod  IntentDeliveryMethod @default(WEBHOOK)
+  webhookId       String?
+  webhook         IntentWebhook? @relation(fields: [webhookId], references: [id])
+
+  // Batch delivery settings (for non-realtime)
+  batchFrequency  BatchFrequency?
+  nextBatchAt     DateTime?
+
+  // Stripe subscription
+  stripeSubscriptionId  String?  @unique
+
+  // Monthly billing
+  monthlyPrice    Decimal  @db.Decimal(10, 2)
+  signalCap       Int?     // Max signals per month (null = unlimited)
+  signalsThisMonth Int     @default(0)
+
+  // Status
+  status          IntentSubscriptionStatus @default(ACTIVE)
+  pausedAt        DateTime?
+  cancelledAt     DateTime?
+
+  // Stats
+  totalSignalsReceived  Int @default(0)
+  totalDeliveries       Int @default(0)
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  // Relations
+  deliveries      IntentDelivery[]
+
+  @@index([tenantId])
+  @@index([status])
+  @@index([nextBatchAt])
+  @@map("intent_subscriptions")
+}
+
+enum IntentDeliveryMethod {
+  WEBHOOK         // Real-time push to webhook
+  BATCH_EMAIL     // Batch delivery via email
+  BATCH_SFTP      // Batch delivery via SFTP
+  API_POLL        // Customer polls the API
+}
+
+enum BatchFrequency {
+  HOURLY
+  EVERY_4_HOURS
+  DAILY
+  WEEKLY
+}
+
+enum IntentSubscriptionStatus {
+  ACTIVE
+  PAUSED
+  CANCELLED
+  SUSPENDED       // Payment issue
+}
+
+model IntentWebhook {
+  id              String   @id @default(uuid())
+  tenantId        String
+  tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  // Webhook configuration
+  name            String
+  url             String
+  secret          String?  // For signature verification
+
+  // Headers to include
+  headers         Json?    // { "Authorization": "Bearer xxx" }
+
+  // Retry configuration
+  retryAttempts   Int      @default(3)
+  retryDelayMs    Int      @default(1000)
+
+  // Filtering
+  minIntentScore  Int?     // Only send signals above this score
+  categoryFilter  String[] // Only send specific categories
+
+  // Status tracking
+  isActive        Boolean  @default(true)
+  lastDeliveryAt  DateTime?
+  lastSuccessAt   DateTime?
+  lastFailureAt   DateTime?
+  lastErrorMessage String?
+  consecutiveFailures Int  @default(0)
+
+  // Test tracking
+  lastTestAt      DateTime?
+  lastTestSuccess Boolean?
+  lastTestError   String?
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  // Relations
+  subscriptions   IntentSubscription[]
+  deliveries      IntentDelivery[]
+
+  @@index([tenantId])
+  @@index([isActive])
+  @@map("intent_webhooks")
+}
+
+model IntentDelivery {
+  id                  String   @id @default(uuid())
+  subscriptionId      String
+  subscription        IntentSubscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  tenantId            String
+
+  // Webhook used (if applicable)
+  webhookId           String?
+  webhook             IntentWebhook? @relation(fields: [webhookId], references: [id])
+
+  // Delivery type
+  deliveryType        IntentDeliveryType
+
+  // Content
+  signalCount         Int
+  payload             Json?    // The actual signals delivered
+
+  // Status
+  status              IntentDeliveryStatus @default(PENDING)
+  attemptCount        Int      @default(0)
+  lastAttemptAt       DateTime?
+  errorMessage        String?
+
+  // Response tracking (for webhooks)
+  responseStatusCode  Int?
+  responseTimeMs      Int?
+
+  // Timestamps
+  scheduledAt         DateTime?
+  deliveredAt         DateTime?
+  createdAt           DateTime @default(now())
+
+  @@index([subscriptionId])
+  @@index([tenantId])
+  @@index([status])
+  @@index([scheduledAt])
+  @@map("intent_deliveries")
+}
+
+enum IntentDeliveryType {
+  REALTIME_WEBHOOK    // Immediate push on signal receipt
+  BATCH_WEBHOOK       // Scheduled batch to webhook
+  BATCH_EMAIL         // Scheduled batch via email
+  BATCH_SFTP          // Scheduled batch via SFTP
+  API_RESPONSE        // Returned via API call
+}
+
+enum IntentDeliveryStatus {
+  PENDING
+  DELIVERING
+  DELIVERED
+  FAILED
+  RETRYING
 }

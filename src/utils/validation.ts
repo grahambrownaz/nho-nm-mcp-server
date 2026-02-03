@@ -4,6 +4,7 @@
  */
 
 import { z } from 'zod';
+import { ValidationError } from './errors.js';
 
 // ============================================================================
 // ENUMS & BASE TYPES
@@ -308,7 +309,6 @@ export function validateInput<T>(
 ): T {
   const result = schema.safeParse(data);
   if (!result.success) {
-    const { ValidationError } = require('./errors.js');
     const errors = result.error.errors.map((e) => ({
       path: e.path.join('.'),
       message: e.message,
