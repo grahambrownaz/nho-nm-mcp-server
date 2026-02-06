@@ -22,10 +22,12 @@ import filterRoutes from './routes/filters.js';
 import purchaseRoutes from './routes/purchases.js';
 import exportRoutes from './routes/exports.js';
 import intentRoutes from './routes/intent.js';
+import emailRoutes from './routes/email.js';
 import healthRoutes from './routes/health.js';
 
-// Import webhook handler
+// Import webhook handlers
 import { handleStripeWebhook } from '../webhooks/stripe.js';
+import { handleReachMailWebhook } from '../webhooks/reachmail.js';
 
 /**
  * Create and configure the Express app
@@ -38,6 +40,9 @@ export function createRestApi(): Express {
 
   // Stripe webhook needs raw body for signature verification
   app.post('/webhooks/stripe', webhookRateLimiter, express.raw({ type: 'application/json' }), handleStripeWebhook);
+
+  // ReachMail webhook for email campaign events
+  app.post('/webhooks/reachmail', webhookRateLimiter, express.json(), handleReachMailWebhook);
 
   // JSON body parser for all other routes
   app.use(express.json({ limit: '10mb' }));
@@ -83,6 +88,7 @@ export function createRestApi(): Express {
   app.use('/api/v1/purchases', purchaseRoutes);
   app.use('/api/v1/exports', exportRoutes);
   app.use('/api/v1/intent', intentRoutes);
+  app.use('/api/v1/email', emailRoutes);
 
   // 404 handler
   app.use('/api', notFoundHandler);

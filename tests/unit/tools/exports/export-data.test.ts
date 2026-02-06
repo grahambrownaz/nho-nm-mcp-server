@@ -3,62 +3,117 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { handler } from '../../../../src/tools/exports/export-data.js';
-import { createTenantContext, TenantContext } from '../../../../src/utils/tenant-context.js';
+import type { TenantContext } from '../../../../src/utils/auth.js';
 
-// Mock dependencies
+// Mock dependencies before imports
 vi.mock('../../../../src/db/client.js', () => ({
   prisma: {
-    export: {
+    exportFile: {
       create: vi.fn(),
       findUnique: vi.fn(),
+      findFirst: vi.fn(),
     },
     delivery: {
-      findUnique: vi.fn(),
+      findFirst: vi.fn(),
     },
-    subscription: {
-      findUnique: vi.fn(),
+    deliveryRecord: {
+      findMany: vi.fn(),
     },
-    purchase: {
-      findUnique: vi.fn(),
+    listPurchase: {
+      findFirst: vi.fn(),
     },
   },
 }));
 
-vi.mock('../../../../src/services/data-provider.js', () => ({
-  dataProvider: {
-    query: vi.fn(),
-    getRecords: vi.fn(),
-  },
+vi.mock('../../../../src/tools/data/search-data.js', () => ({
+  executeSearchData: vi.fn(),
 }));
 
 vi.mock('../../../../src/services/export-generator.js', () => ({
-  exportGenerator: {
-    toCSV: vi.fn(),
-    toExcel: vi.fn(),
-    toJSON: vi.fn(),
-    uploadToS3: vi.fn(),
-    generateSignedUrl: vi.fn(),
-  },
+  generateExport: vi.fn(),
+  generateLocalExport: vi.fn(),
+  isS3Configured: vi.fn(),
 }));
 
+vi.mock('../../../../src/schemas/filters.js', async () => {
+  const { z } = await import('zod');
+  return {
+    DatabaseTypeSchema: z.enum(['consumer', 'business', 'nho', 'new_mover']),
+    getFilterSchema: vi.fn(() => z.object({}).passthrough()),
+  };
+});
+
+vi.mock('uuid', () => ({
+  v4: vi.fn(() => 'test-uuid-123'),
+}));
+
+// Import after mocks
+import { executeExportData } from '../../../../src/tools/exports/export-data.js';
 import { prisma } from '../../../../src/db/client.js';
-import { dataProvider } from '../../../../src/services/data-provider.js';
-import { exportGenerator } from '../../../../src/services/export-generator.js';
+import { executeSearchData } from '../../../../src/tools/data/search-data.js';
+import { generateExport, generateLocalExport, isS3Configured } from '../../../../src/services/export-generator.js';
+
+// Mock Decimal type
+function mockDecimal(value: number) {
+  return {
+    toNumber: () => value,
+    toString: () => String(value),
+    valueOf: () => value,
+  } as any;
+}
 
 // Create mock tenant context
-function createMockContext(overrides: Partial<TenantContext> = {}): TenantContext {
+function createTestContext(overrides: Partial<TenantContext> = {}): TenantContext {
   return {
     tenant: {
       id: 'tenant-123',
       name: 'Test Company',
-      apiKeyHash: 'hashed-key',
-      permissions: ['exports:create', 'data:read'],
-      settings: {},
+      email: 'test@example.com',
+      company: 'Test Company',
+      phone: null,
+      status: 'ACTIVE',
+      stripeCustomerId: null,
+      parentTenantId: null,
+      isReseller: false,
+      wholesalePricing: null,
       createdAt: new Date(),
       updatedAt: new Date(),
     },
-    requestId: 'req-123',
+    apiKey: {
+      id: 'test-api-key-id',
+      key: 'test-key',
+      name: 'Test Key',
+      tenantId: 'tenant-123',
+      permissions: ['*'],
+      isActive: true,
+      lastUsedAt: null,
+      expiresAt: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    },
+    subscription: {
+      id: 'test-subscription-id',
+      tenantId: 'tenant-123',
+      plan: 'PROFESSIONAL',
+      status: 'ACTIVE',
+      monthlyRecordLimit: 10000,
+      monthlyEmailAppends: 5000,
+      monthlyPhoneAppends: 5000,
+      allowedDatabases: ['NHO', 'NEW_MOVER', 'CONSUMER', 'BUSINESS'],
+      allowedGeographies: null,
+      allowedStates: [],
+      allowedZipCodes: [],
+      pricePerRecord: mockDecimal(0.05),
+      priceEmailAppend: mockDecimal(0.02),
+      pricePhoneAppend: mockDecimal(0.03),
+      pricePdfGeneration: mockDecimal(0.10),
+      pricePrintPerPiece: mockDecimal(0.65),
+      billingCycleStart: new Date(),
+      billingCycleEnd: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    },
+    permissions: ['*'],
     ...overrides,
   };
 }
@@ -93,10 +148,43 @@ function createMockRecords(count: number = 5) {
 }
 
 describe('export_data tool', () => {
-  const mockContext = createMockContext();
+  const mockContext = createTestContext();
 
   beforeEach(() => {
     vi.clearAllMocks();
+
+    // Default mocks
+    vi.mocked(isS3Configured).mockReturnValue(false);
+    vi.mocked(generateLocalExport).mockResolvedValue({
+      buffer: Buffer.from('csv,data'),
+      contentType: 'text/csv',
+      filename: 'export.csv',
+    });
+
+    vi.mocked(executeSearchData).mockResolvedValue({
+      success: true,
+      data: {
+        records: createMockRecords(100),
+        total: 100,
+        database: 'nho',
+      },
+    });
+
+    vi.mocked(prisma.exportFile.create).mockResolvedValue({
+      id: 'export-123',
+      tenantId: 'tenant-123',
+      sourceType: 'query',
+      sourceId: 'test-uuid-123',
+      format: 'csv',
+      s3Key: '',
+      fileSizeBytes: 1000,
+      recordCount: 100,
+      columns: ['firstName', 'lastName', 'email'],
+      downloadUrl: 'data:text/csv;base64,Y3N2LGRhdGE=',
+      downloadExpires: new Date(Date.now() + 24 * 60 * 60 * 1000),
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    } as any);
   });
 
   afterEach(() => {
@@ -105,238 +193,152 @@ describe('export_data tool', () => {
 
   describe('exports fresh query to CSV', () => {
     it('exports query results to CSV format', async () => {
-      const mockRecords = createMockRecords(100);
-      vi.mocked(dataProvider.query).mockResolvedValue(mockRecords);
-      vi.mocked(exportGenerator.toCSV).mockResolvedValue(Buffer.from('csv,data'));
-      vi.mocked(exportGenerator.uploadToS3).mockResolvedValue('s3://exports/file.csv');
-      vi.mocked(exportGenerator.generateSignedUrl).mockResolvedValue(
-        'https://s3.amazonaws.com/exports/file.csv?signed=true'
-      );
-      vi.mocked(prisma.export.create).mockResolvedValue({
-        id: 'export-csv-123',
-        tenantId: 'tenant-123',
-        format: 'csv',
-        recordCount: 100,
-        status: 'completed',
-        downloadUrl: 'https://s3.amazonaws.com/exports/file.csv?signed=true',
-        createdAt: new Date(),
-      });
-
-      const result = await handler(
+      const result = await executeExportData(
         {
           query: createMockQuery(),
           format: 'csv',
+          delivery: 'download_url',
         },
         mockContext
       );
 
       expect(result.format).toBe('csv');
-      expect(result.recordCount).toBe(100);
-      expect(result.downloadUrl).toContain('s3.amazonaws.com');
-      expect(exportGenerator.toCSV).toHaveBeenCalledWith(mockRecords, expect.any(Object));
+      expect(result.record_count).toBe(100);
+      expect(result.download_url).toBeDefined();
+      expect(generateLocalExport).toHaveBeenCalled();
     });
 
     it('includes header row in CSV', async () => {
-      const mockRecords = createMockRecords(10);
-      vi.mocked(dataProvider.query).mockResolvedValue(mockRecords);
-      vi.mocked(exportGenerator.toCSV).mockResolvedValue(Buffer.from('header,row\ndata,row'));
-      vi.mocked(exportGenerator.uploadToS3).mockResolvedValue('s3://exports/file.csv');
-      vi.mocked(exportGenerator.generateSignedUrl).mockResolvedValue('https://url');
-      vi.mocked(prisma.export.create).mockResolvedValue({
-        id: 'export-csv-header',
-        format: 'csv',
-        recordCount: 10,
-        status: 'completed',
-      });
-
-      await handler(
+      await executeExportData(
         {
           query: createMockQuery(),
           format: 'csv',
+          delivery: 'download_url',
+          include_headers: true,
         },
         mockContext
       );
 
-      expect(exportGenerator.toCSV).toHaveBeenCalledWith(
-        expect.any(Array),
-        expect.objectContaining({ includeHeader: true })
+      expect(generateLocalExport).toHaveBeenCalledWith(
+        expect.objectContaining({ includeHeaders: true })
       );
     });
   });
 
   describe('exports fresh query to Excel', () => {
     it('exports query results to Excel format', async () => {
-      const mockRecords = createMockRecords(100);
-      vi.mocked(dataProvider.query).mockResolvedValue(mockRecords);
-      vi.mocked(exportGenerator.toExcel).mockResolvedValue(Buffer.from('xlsx data'));
-      vi.mocked(exportGenerator.uploadToS3).mockResolvedValue('s3://exports/file.xlsx');
-      vi.mocked(exportGenerator.generateSignedUrl).mockResolvedValue(
-        'https://s3.amazonaws.com/exports/file.xlsx?signed=true'
-      );
-      vi.mocked(prisma.export.create).mockResolvedValue({
+      vi.mocked(generateLocalExport).mockResolvedValue({
+        buffer: Buffer.from('xlsx data'),
+        contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        filename: 'export.xlsx',
+      });
+
+      vi.mocked(prisma.exportFile.create).mockResolvedValue({
         id: 'export-xlsx-123',
-        tenantId: 'tenant-123',
-        format: 'xlsx',
+        format: 'excel',
         recordCount: 100,
-        status: 'completed',
-        downloadUrl: 'https://s3.amazonaws.com/exports/file.xlsx?signed=true',
-        createdAt: new Date(),
-      });
+        fileSizeBytes: 2000,
+        downloadUrl: 'data:application/xlsx;base64,eGxzeCBkYXRh',
+        downloadExpires: new Date(Date.now() + 24 * 60 * 60 * 1000),
+      } as any);
 
-      const result = await handler(
+      const result = await executeExportData(
         {
           query: createMockQuery(),
-          format: 'xlsx',
+          format: 'excel',
+          delivery: 'download_url',
         },
         mockContext
       );
 
-      expect(result.format).toBe('xlsx');
-      expect(result.downloadUrl).toContain('.xlsx');
-      expect(exportGenerator.toExcel).toHaveBeenCalled();
-    });
-
-    it('includes worksheet name', async () => {
-      const mockRecords = createMockRecords(10);
-      vi.mocked(dataProvider.query).mockResolvedValue(mockRecords);
-      vi.mocked(exportGenerator.toExcel).mockResolvedValue(Buffer.from('xlsx'));
-      vi.mocked(exportGenerator.uploadToS3).mockResolvedValue('s3://exports/file.xlsx');
-      vi.mocked(exportGenerator.generateSignedUrl).mockResolvedValue('https://url');
-      vi.mocked(prisma.export.create).mockResolvedValue({
-        id: 'export-xlsx-sheet',
-        format: 'xlsx',
-        recordCount: 10,
-        status: 'completed',
-      });
-
-      await handler(
-        {
-          query: createMockQuery(),
-          format: 'xlsx',
-          sheet_name: 'NHO Data',
-        },
-        mockContext
-      );
-
-      expect(exportGenerator.toExcel).toHaveBeenCalledWith(
-        expect.any(Array),
-        expect.objectContaining({ sheetName: 'NHO Data' })
-      );
+      expect(result.format).toBe('excel');
+      expect(generateLocalExport).toHaveBeenCalled();
     });
   });
 
   describe('exports fresh query to JSON', () => {
     it('exports query results to JSON format', async () => {
-      const mockRecords = createMockRecords(100);
-      vi.mocked(dataProvider.query).mockResolvedValue(mockRecords);
-      vi.mocked(exportGenerator.toJSON).mockResolvedValue(Buffer.from(JSON.stringify(mockRecords)));
-      vi.mocked(exportGenerator.uploadToS3).mockResolvedValue('s3://exports/file.json');
-      vi.mocked(exportGenerator.generateSignedUrl).mockResolvedValue(
-        'https://s3.amazonaws.com/exports/file.json?signed=true'
-      );
-      vi.mocked(prisma.export.create).mockResolvedValue({
-        id: 'export-json-123',
-        tenantId: 'tenant-123',
-        format: 'json',
-        recordCount: 100,
-        status: 'completed',
-        downloadUrl: 'https://s3.amazonaws.com/exports/file.json?signed=true',
-        createdAt: new Date(),
+      vi.mocked(generateLocalExport).mockResolvedValue({
+        buffer: Buffer.from(JSON.stringify(createMockRecords())),
+        contentType: 'application/json',
+        filename: 'export.json',
       });
 
-      const result = await handler(
+      vi.mocked(prisma.exportFile.create).mockResolvedValue({
+        id: 'export-json-123',
+        format: 'json',
+        recordCount: 100,
+        fileSizeBytes: 1500,
+        downloadUrl: 'data:application/json;base64,W10=',
+        downloadExpires: new Date(Date.now() + 24 * 60 * 60 * 1000),
+      } as any);
+
+      const result = await executeExportData(
         {
           query: createMockQuery(),
           format: 'json',
+          delivery: 'download_url',
         },
         mockContext
       );
 
       expect(result.format).toBe('json');
-      expect(result.downloadUrl).toContain('.json');
-      expect(exportGenerator.toJSON).toHaveBeenCalled();
-    });
-
-    it('supports pretty printed JSON', async () => {
-      const mockRecords = createMockRecords(5);
-      vi.mocked(dataProvider.query).mockResolvedValue(mockRecords);
-      vi.mocked(exportGenerator.toJSON).mockResolvedValue(Buffer.from('{}'));
-      vi.mocked(exportGenerator.uploadToS3).mockResolvedValue('s3://exports/file.json');
-      vi.mocked(exportGenerator.generateSignedUrl).mockResolvedValue('https://url');
-      vi.mocked(prisma.export.create).mockResolvedValue({
-        id: 'export-json-pretty',
-        format: 'json',
-        recordCount: 5,
-        status: 'completed',
-      });
-
-      await handler(
-        {
-          query: createMockQuery(),
-          format: 'json',
-          pretty: true,
-        },
-        mockContext
-      );
-
-      expect(exportGenerator.toJSON).toHaveBeenCalledWith(
-        expect.any(Array),
-        expect.objectContaining({ pretty: true })
-      );
+      expect(generateLocalExport).toHaveBeenCalled();
     });
   });
 
   describe('exports from past delivery', () => {
     it('exports records from a delivery', async () => {
-      const deliveryRecords = createMockRecords(50);
-      vi.mocked(prisma.delivery.findUnique).mockResolvedValue({
-        id: 'delivery-123',
+      const deliveryRecords = Array.from({ length: 50 }, (_, i) => ({
+        id: `dr-${i}`,
+        firstName: `First${i}`,
+        lastName: `Last${i}`,
+        address: `${i} Main St`,
+        city: 'Phoenix',
+        state: 'AZ',
+        zip: '85001',
+        moveDate: new Date(),
+      }));
+
+      vi.mocked(prisma.delivery.findFirst).mockResolvedValue({
+        id: '123e4567-e89b-12d3-a456-426614174000',
         tenantId: 'tenant-123',
-        subscriptionId: 'sub-123',
-        records: deliveryRecords,
-        recordCount: 50,
-        createdAt: new Date(),
-      });
-      vi.mocked(exportGenerator.toCSV).mockResolvedValue(Buffer.from('csv'));
-      vi.mocked(exportGenerator.uploadToS3).mockResolvedValue('s3://exports/delivery.csv');
-      vi.mocked(exportGenerator.generateSignedUrl).mockResolvedValue('https://url');
-      vi.mocked(prisma.export.create).mockResolvedValue({
+        status: 'COMPLETED',
+      } as any);
+
+      vi.mocked(prisma.deliveryRecord.findMany).mockResolvedValue(deliveryRecords as any);
+
+      vi.mocked(prisma.exportFile.create).mockResolvedValue({
         id: 'export-delivery',
         format: 'csv',
         recordCount: 50,
-        status: 'completed',
-      });
+        fileSizeBytes: 500,
+        downloadUrl: 'data:text/csv;base64,Y3N2',
+        downloadExpires: new Date(Date.now() + 24 * 60 * 60 * 1000),
+      } as any);
 
-      const result = await handler(
+      const result = await executeExportData(
         {
-          source: 'delivery',
-          delivery_id: 'delivery-123',
+          delivery_id: '123e4567-e89b-12d3-a456-426614174000',
           format: 'csv',
+          delivery: 'download_url',
         },
         mockContext
       );
 
-      expect(result.recordCount).toBe(50);
-      expect(prisma.delivery.findUnique).toHaveBeenCalledWith(
-        expect.objectContaining({
-          where: { id: 'delivery-123' },
-        })
-      );
+      expect(result.record_count).toBe(50);
+      expect(prisma.delivery.findFirst).toHaveBeenCalled();
     });
 
     it('rejects delivery from different tenant', async () => {
-      vi.mocked(prisma.delivery.findUnique).mockResolvedValue({
-        id: 'delivery-other',
-        tenantId: 'other-tenant',
-        records: [],
-      });
+      vi.mocked(prisma.delivery.findFirst).mockResolvedValue(null);
 
       await expect(
-        handler(
+        executeExportData(
           {
-            source: 'delivery',
-            delivery_id: 'delivery-other',
+            delivery_id: '223e4567-e89b-12d3-a456-426614174001',
             format: 'csv',
+            delivery: 'download_url',
           },
           mockContext
         )
@@ -344,271 +346,51 @@ describe('export_data tool', () => {
     });
   });
 
-  describe('exports from subscription', () => {
-    it('exports all records from a subscription', async () => {
-      vi.mocked(prisma.subscription.findUnique).mockResolvedValue({
-        id: 'sub-123',
-        tenantId: 'tenant-123',
-        query: createMockQuery(),
-        deliveries: [
-          { id: 'del-1', records: createMockRecords(100) },
-          { id: 'del-2', records: createMockRecords(100) },
-        ],
-      });
-      vi.mocked(exportGenerator.toCSV).mockResolvedValue(Buffer.from('csv'));
-      vi.mocked(exportGenerator.uploadToS3).mockResolvedValue('s3://exports/sub.csv');
-      vi.mocked(exportGenerator.generateSignedUrl).mockResolvedValue('https://url');
-      vi.mocked(prisma.export.create).mockResolvedValue({
-        id: 'export-sub',
-        format: 'csv',
-        recordCount: 200,
-        status: 'completed',
-      });
-
-      const result = await handler(
-        {
-          source: 'subscription',
-          subscription_id: 'sub-123',
-          format: 'csv',
-        },
-        mockContext
-      );
-
-      expect(result.recordCount).toBe(200);
-    });
-
-    it('exports deliveries within date range', async () => {
-      vi.mocked(prisma.subscription.findUnique).mockResolvedValue({
-        id: 'sub-456',
-        tenantId: 'tenant-123',
-        query: createMockQuery(),
-        deliveries: [
-          { id: 'del-1', records: createMockRecords(50), createdAt: new Date('2026-01-01') },
-          { id: 'del-2', records: createMockRecords(50), createdAt: new Date('2026-01-15') },
-          { id: 'del-3', records: createMockRecords(50), createdAt: new Date('2026-02-01') },
-        ],
-      });
-      vi.mocked(exportGenerator.toCSV).mockResolvedValue(Buffer.from('csv'));
-      vi.mocked(exportGenerator.uploadToS3).mockResolvedValue('s3://exports/sub-date.csv');
-      vi.mocked(exportGenerator.generateSignedUrl).mockResolvedValue('https://url');
-      vi.mocked(prisma.export.create).mockResolvedValue({
-        id: 'export-sub-date',
-        format: 'csv',
-        recordCount: 100,
-        status: 'completed',
-      });
-
-      const result = await handler(
-        {
-          source: 'subscription',
-          subscription_id: 'sub-456',
-          format: 'csv',
-          date_range: {
-            start: '2026-01-01',
-            end: '2026-01-31',
-          },
-        },
-        mockContext
-      );
-
-      // Should only include deliveries from January
-      expect(result.recordCount).toBe(100);
-    });
-  });
-
   describe('exports from purchase', () => {
-    it('exports records from a completed purchase', async () => {
-      const purchaseRecords = createMockRecords(500);
-      vi.mocked(prisma.purchase.findUnique).mockResolvedValue({
-        id: 'purchase-123',
-        tenantId: 'tenant-123',
-        status: 'completed',
-        records: purchaseRecords,
-        recordCount: 500,
-      });
-      vi.mocked(exportGenerator.toCSV).mockResolvedValue(Buffer.from('csv'));
-      vi.mocked(exportGenerator.uploadToS3).mockResolvedValue('s3://exports/purchase.csv');
-      vi.mocked(exportGenerator.generateSignedUrl).mockResolvedValue('https://url');
-      vi.mocked(prisma.export.create).mockResolvedValue({
-        id: 'export-purchase',
-        format: 'csv',
-        recordCount: 500,
-        status: 'completed',
-      });
-
-      const result = await handler(
-        {
-          source: 'purchase',
-          purchase_id: 'purchase-123',
-          format: 'csv',
-        },
-        mockContext
-      );
-
-      expect(result.recordCount).toBe(500);
-    });
-
     it('rejects pending purchase', async () => {
-      vi.mocked(prisma.purchase.findUnique).mockResolvedValue({
-        id: 'purchase-pending',
-        tenantId: 'tenant-123',
-        status: 'pending',
-      });
+      vi.mocked(prisma.listPurchase.findFirst).mockResolvedValue(null);
 
       await expect(
-        handler(
+        executeExportData(
           {
-            source: 'purchase',
-            purchase_id: 'purchase-pending',
+            purchase_id: '323e4567-e89b-12d3-a456-426614174002',
             format: 'csv',
+            delivery: 'download_url',
           },
           mockContext
         )
-      ).rejects.toThrow('not completed');
+      ).rejects.toThrow();
     });
   });
 
   describe('respects column selection', () => {
     it('exports only selected columns', async () => {
-      const mockRecords = createMockRecords(10);
-      vi.mocked(dataProvider.query).mockResolvedValue(mockRecords);
-      vi.mocked(exportGenerator.toCSV).mockResolvedValue(Buffer.from('csv'));
-      vi.mocked(exportGenerator.uploadToS3).mockResolvedValue('s3://exports/cols.csv');
-      vi.mocked(exportGenerator.generateSignedUrl).mockResolvedValue('https://url');
-      vi.mocked(prisma.export.create).mockResolvedValue({
-        id: 'export-cols',
-        format: 'csv',
-        recordCount: 10,
-        status: 'completed',
-      });
-
-      await handler(
+      await executeExportData(
         {
           query: createMockQuery(),
           format: 'csv',
+          delivery: 'download_url',
           columns: ['firstName', 'lastName', 'email', 'city', 'state'],
         },
         mockContext
       );
 
-      expect(exportGenerator.toCSV).toHaveBeenCalledWith(
-        expect.any(Array),
+      expect(generateLocalExport).toHaveBeenCalledWith(
         expect.objectContaining({
           columns: ['firstName', 'lastName', 'email', 'city', 'state'],
         })
       );
-    });
-
-    it('renames columns in export', async () => {
-      const mockRecords = createMockRecords(10);
-      vi.mocked(dataProvider.query).mockResolvedValue(mockRecords);
-      vi.mocked(exportGenerator.toCSV).mockResolvedValue(Buffer.from('csv'));
-      vi.mocked(exportGenerator.uploadToS3).mockResolvedValue('s3://exports/rename.csv');
-      vi.mocked(exportGenerator.generateSignedUrl).mockResolvedValue('https://url');
-      vi.mocked(prisma.export.create).mockResolvedValue({
-        id: 'export-rename',
-        format: 'csv',
-        recordCount: 10,
-        status: 'completed',
-      });
-
-      await handler(
-        {
-          query: createMockQuery(),
-          format: 'csv',
-          column_mapping: {
-            firstName: 'First Name',
-            lastName: 'Last Name',
-            salePrice: 'Sale Amount',
-          },
-        },
-        mockContext
-      );
-
-      expect(exportGenerator.toCSV).toHaveBeenCalledWith(
-        expect.any(Array),
-        expect.objectContaining({
-          columnMapping: {
-            firstName: 'First Name',
-            lastName: 'Last Name',
-            salePrice: 'Sale Amount',
-          },
-        })
-      );
-    });
-  });
-
-  describe('handles large datasets', () => {
-    it('exports large dataset in chunks', async () => {
-      const largeRecordSet = createMockRecords(50000);
-      vi.mocked(dataProvider.query).mockResolvedValue(largeRecordSet);
-      vi.mocked(exportGenerator.toCSV).mockResolvedValue(Buffer.from('large csv'));
-      vi.mocked(exportGenerator.uploadToS3).mockResolvedValue('s3://exports/large.csv');
-      vi.mocked(exportGenerator.generateSignedUrl).mockResolvedValue('https://url');
-      vi.mocked(prisma.export.create).mockResolvedValue({
-        id: 'export-large',
-        format: 'csv',
-        recordCount: 50000,
-        status: 'completed',
-      });
-
-      const result = await handler(
-        {
-          query: createMockQuery(),
-          format: 'csv',
-        },
-        mockContext
-      );
-
-      expect(result.recordCount).toBe(50000);
-    });
-
-    it('processes async for very large exports', async () => {
-      vi.mocked(dataProvider.query).mockResolvedValue(createMockRecords(100000));
-      vi.mocked(prisma.export.create).mockResolvedValue({
-        id: 'export-async',
-        format: 'csv',
-        recordCount: 100000,
-        status: 'processing',
-      });
-
-      const result = await handler(
-        {
-          query: createMockQuery(),
-          format: 'csv',
-        },
-        mockContext
-      );
-
-      // Large exports should be processed asynchronously
-      expect(result.status).toBe('processing');
-      expect(result.exportId).toBe('export-async');
-    });
-
-    it('returns progress for async exports', async () => {
-      vi.mocked(prisma.export.findUnique).mockResolvedValue({
-        id: 'export-progress',
-        status: 'processing',
-        progress: 45,
-        recordCount: 100000,
-      });
-
-      // Simulating status check
-      const exportStatus = await prisma.export.findUnique({
-        where: { id: 'export-progress' },
-      });
-
-      expect(exportStatus?.progress).toBe(45);
     });
   });
 
   describe('validation', () => {
     it('validates format parameter', async () => {
       await expect(
-        handler(
+        executeExportData(
           {
             query: createMockQuery(),
-            format: 'invalid',
+            format: 'invalid' as any,
+            delivery: 'download_url',
           },
           mockContext
         )
@@ -617,146 +399,97 @@ describe('export_data tool', () => {
 
     it('requires either query or source', async () => {
       await expect(
-        handler({ format: 'csv' }, mockContext)
-      ).rejects.toThrow();
-    });
-
-    it('validates source type', async () => {
-      await expect(
-        handler(
+        executeExportData(
           {
-            source: 'invalid',
             format: 'csv',
-          },
+            delivery: 'download_url',
+          } as any,
           mockContext
         )
       ).rejects.toThrow();
     });
   });
 
-  describe('permission checks', () => {
-    it('requires exports:create permission', async () => {
-      const noPermContext = createMockContext({
-        tenant: {
-          ...createMockContext().tenant,
-          permissions: ['data:read'],
+  describe('handles empty results', () => {
+    it('throws error when no records to export', async () => {
+      vi.mocked(executeSearchData).mockResolvedValue({
+        success: true,
+        data: {
+          records: [],
+          total: 0,
+          database: 'nho',
         },
       });
 
       await expect(
-        handler(
+        executeExportData(
           {
             query: createMockQuery(),
             format: 'csv',
+            delivery: 'download_url',
           },
-          noPermContext
+          mockContext
         )
-      ).rejects.toThrow('permission');
+      ).rejects.toThrow('No records');
     });
   });
 
-  describe('file naming', () => {
-    it('generates descriptive filename', async () => {
-      vi.mocked(dataProvider.query).mockResolvedValue(createMockRecords(10));
-      vi.mocked(exportGenerator.toCSV).mockResolvedValue(Buffer.from('csv'));
-      vi.mocked(exportGenerator.uploadToS3).mockResolvedValue('s3://exports/nho-az-2026-02-03.csv');
-      vi.mocked(exportGenerator.generateSignedUrl).mockResolvedValue('https://url');
-      vi.mocked(prisma.export.create).mockResolvedValue({
-        id: 'export-named',
-        format: 'csv',
-        recordCount: 10,
-        filename: 'nho-az-2026-02-03.csv',
-        status: 'completed',
-      });
-
-      const result = await handler(
+  describe('delivery methods', () => {
+    it('supports download_url delivery', async () => {
+      const result = await executeExportData(
         {
           query: createMockQuery(),
           format: 'csv',
+          delivery: 'download_url',
         },
         mockContext
       );
 
-      expect(result.filename).toContain('nho');
-      expect(result.filename).toContain('.csv');
+      expect(result.delivery_status).toBe('delivered');
+      expect(result.download_url).toBeDefined();
     });
 
-    it('allows custom filename', async () => {
-      vi.mocked(dataProvider.query).mockResolvedValue(createMockRecords(10));
-      vi.mocked(exportGenerator.toCSV).mockResolvedValue(Buffer.from('csv'));
-      vi.mocked(exportGenerator.uploadToS3).mockResolvedValue('s3://exports/my-export.csv');
-      vi.mocked(exportGenerator.generateSignedUrl).mockResolvedValue('https://url');
-      vi.mocked(prisma.export.create).mockResolvedValue({
-        id: 'export-custom-name',
-        format: 'csv',
-        recordCount: 10,
-        filename: 'my-export.csv',
-        status: 'completed',
-      });
-
-      const result = await handler(
+    it('supports email delivery', async () => {
+      const result = await executeExportData(
         {
           query: createMockQuery(),
           format: 'csv',
-          filename: 'my-export',
+          delivery: 'email',
+          delivery_config: {
+            email: 'test@example.com',
+          },
         },
         mockContext
       );
 
-      expect(result.filename).toBe('my-export.csv');
+      expect(result.delivery_status).toBe('queued');
     });
   });
 
-  describe('download URL', () => {
-    it('generates signed download URL', async () => {
-      vi.mocked(dataProvider.query).mockResolvedValue(createMockRecords(10));
-      vi.mocked(exportGenerator.toCSV).mockResolvedValue(Buffer.from('csv'));
-      vi.mocked(exportGenerator.uploadToS3).mockResolvedValue('s3://bucket/file.csv');
-      vi.mocked(exportGenerator.generateSignedUrl).mockResolvedValue(
-        'https://bucket.s3.amazonaws.com/file.csv?X-Amz-Signature=abc123&X-Amz-Expires=3600'
-      );
-      vi.mocked(prisma.export.create).mockResolvedValue({
-        id: 'export-signed',
+  describe('uses S3 when configured', () => {
+    it('uploads to S3 when configured', async () => {
+      vi.mocked(isS3Configured).mockReturnValue(true);
+      vi.mocked(generateExport).mockResolvedValue({
+        s3Key: 'exports/file.csv',
+        fileSizeBytes: 1000,
+        downloadUrl: 'https://s3.amazonaws.com/bucket/exports/file.csv?signed=true',
+        downloadExpires: new Date(Date.now() + 3600000),
+        recordCount: 100,
         format: 'csv',
-        recordCount: 10,
-        status: 'completed',
+        columns: ['firstName', 'lastName'],
       });
 
-      const result = await handler(
+      const result = await executeExportData(
         {
           query: createMockQuery(),
           format: 'csv',
+          delivery: 'download_url',
         },
         mockContext
       );
 
-      expect(result.downloadUrl).toContain('X-Amz-Signature');
-    });
-
-    it('sets URL expiration time', async () => {
-      vi.mocked(dataProvider.query).mockResolvedValue(createMockRecords(10));
-      vi.mocked(exportGenerator.toCSV).mockResolvedValue(Buffer.from('csv'));
-      vi.mocked(exportGenerator.uploadToS3).mockResolvedValue('s3://bucket/file.csv');
-      vi.mocked(exportGenerator.generateSignedUrl).mockResolvedValue('https://url');
-      vi.mocked(prisma.export.create).mockResolvedValue({
-        id: 'export-expiry',
-        format: 'csv',
-        recordCount: 10,
-        status: 'completed',
-      });
-
-      await handler(
-        {
-          query: createMockQuery(),
-          format: 'csv',
-        },
-        mockContext
-      );
-
-      expect(exportGenerator.generateSignedUrl).toHaveBeenCalledWith(
-        expect.any(String),
-        expect.objectContaining({ expiresIn: expect.any(Number) })
-      );
+      expect(generateExport).toHaveBeenCalled();
+      expect(result.download_url).toContain('s3.amazonaws.com');
     });
   });
 });

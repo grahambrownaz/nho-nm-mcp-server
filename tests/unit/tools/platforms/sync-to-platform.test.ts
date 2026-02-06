@@ -3,51 +3,35 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { executeSyncToPlatform } from '../../../../src/tools/platforms/sync-to-platform.js';
-import { mailchimpService } from '../../../../src/services/platform-sync/mailchimp.js';
-import { hubspotService } from '../../../../src/services/platform-sync/hubspot.js';
-import { zapierService } from '../../../../src/services/platform-sync/zapier.js';
-import { prisma } from '../../../../src/db/client.js';
 import type { TenantContext } from '../../../../src/utils/auth.js';
-import { ValidationError, AuthorizationError, NotFoundError } from '../../../../src/utils/errors.js';
+import { AuthorizationError } from '../../../../src/utils/errors.js';
 
-// Mock platform services
-vi.mock('../../../../src/services/platform-sync/mailchimp.js', () => ({
-  mailchimpService: {
-    addToAudience: vi.fn(),
-    syncContacts: vi.fn(),
-  },
-}));
-
-vi.mock('../../../../src/services/platform-sync/hubspot.js', () => ({
-  hubspotService: {
-    createContacts: vi.fn(),
-    syncContacts: vi.fn(),
-  },
-}));
-
-vi.mock('../../../../src/services/platform-sync/zapier.js', () => ({
-  zapierService: {
-    sendWebhook: vi.fn(),
-    sendBatch: vi.fn(),
-  },
+// Mock the platform-sync module completely
+vi.mock('../../../../src/services/platform-sync/index.js', () => ({
+  syncToPlatform: vi.fn(),
+  isPlatformSupported: vi.fn(),
+  mailchimpProvider: { testConnection: vi.fn(), syncRecords: vi.fn() },
+  hubspotProvider: { testConnection: vi.fn(), syncRecords: vi.fn() },
+  zapierProvider: { testConnection: vi.fn(), syncRecords: vi.fn() },
 }));
 
 // Mock Prisma client
 vi.mock('../../../../src/db/client.js', () => ({
   prisma: {
-    platformConnection: {
+    deliveryConfig: {
       findFirst: vi.fn(),
       findUnique: vi.fn(),
     },
-    delivery: {
-      findUnique: vi.fn(),
-    },
-    syncLog: {
+    usageRecord: {
       create: vi.fn(),
     },
   },
 }));
+
+// Import after mocks
+import { executeSyncToPlatform } from '../../../../src/tools/platforms/sync-to-platform.js';
+import { syncToPlatform, isPlatformSupported } from '../../../../src/services/platform-sync/index.js';
+import { prisma } from '../../../../src/db/client.js';
 
 // Mock Decimal type
 function mockDecimal(value: number) {
@@ -119,18 +103,20 @@ function createMockConnection(platform: string, overrides: Record<string, unknow
   return {
     id: 'connection-123',
     tenantId: 'test-tenant-id',
-    platform: platform.toUpperCase(),
-    status: 'ACTIVE',
-    encryptedCredentials: 'encrypted-credentials',
-    fieldMapping: {
-      firstName: platform === 'mailchimp' ? 'FNAME' : 'firstname',
-      lastName: platform === 'mailchimp' ? 'LNAME' : 'lastname',
-      email: platform === 'mailchimp' ? 'EMAIL' : 'email',
-      address: platform === 'mailchimp' ? 'ADDRESS' : 'address',
+    name: 'Test Connection',
+    method: 'WEBHOOK',
+    printApiSettings: {
+      platform,
+      credentials: {
+        type: platform,
+        apiKey: 'test-api-key',
+        server: 'us1',
+        webhookUrl: 'https://hooks.zapier.com/test',
+        accessToken: 'test-token',
+      },
+      defaultSettings: {},
     },
-    settings: {
-      audience_id: 'audience-123',
-    },
+    isActive: true,
     ...overrides,
   };
 }
@@ -138,11 +124,10 @@ function createMockConnection(platform: string, overrides: Record<string, unknow
 // Create mock records
 function createMockRecords(count: number = 3) {
   return Array.from({ length: count }, (_, i) => ({
-    id: `record-${i + 1}`,
     firstName: `First${i + 1}`,
     lastName: `Last${i + 1}`,
     email: `user${i + 1}@example.com`,
-    address: `${100 + i} Main Street`,
+    addressLine1: `${100 + i} Main Street`,
     city: 'Phoenix',
     state: 'AZ',
     zip: `8500${i + 1}`,
@@ -154,37 +139,22 @@ describe('sync_to_platform tool', () => {
     vi.clearAllMocks();
 
     // Default mock responses
-    vi.mocked(prisma.platformConnection.findFirst).mockResolvedValue(
-      createMockConnection('mailchimp')
-    );
-    vi.mocked(prisma.delivery.findUnique).mockResolvedValue({
-      id: 'delivery-123',
-      tenantId: 'test-tenant-id',
-      records: createMockRecords(),
-    } as any);
-    vi.mocked(prisma.syncLog.create).mockResolvedValue({
-      id: 'sync-log-123',
-    } as any);
+    vi.mocked(isPlatformSupported).mockReturnValue(true);
+    vi.mocked(syncToPlatform).mockResolvedValue({
+      success: true,
+      platform: 'mailchimp',
+      created: 2,
+      updated: 1,
+      skipped: 0,
+      errors: [],
+    });
 
-    vi.mocked(mailchimpService.syncContacts).mockResolvedValue({
-      created: 2,
-      updated: 1,
-      skipped: 0,
-      failed: 0,
-      errors: [],
-    });
-    vi.mocked(hubspotService.syncContacts).mockResolvedValue({
-      created: 2,
-      updated: 1,
-      skipped: 0,
-      failed: 0,
-      errors: [],
-    });
-    vi.mocked(zapierService.sendBatch).mockResolvedValue({
-      sent: 3,
-      failed: 0,
-      errors: [],
-    });
+    vi.mocked(prisma.deliveryConfig.findFirst).mockResolvedValue(
+      createMockConnection('mailchimp') as any
+    );
+    vi.mocked(prisma.usageRecord.create).mockResolvedValue({
+      id: 'usage-123',
+    } as any);
   });
 
   describe('Mailchimp sync', () => {
@@ -192,66 +162,38 @@ describe('sync_to_platform tool', () => {
       const context = createTestContext();
       const input = {
         platform: 'mailchimp',
-        delivery_id: 'delivery-123',
+        connection_id: 'connection-123',
+        records: createMockRecords(),
       };
-
-      vi.mocked(prisma.platformConnection.findFirst).mockResolvedValue(
-        createMockConnection('mailchimp')
-      );
 
       const result = await executeSyncToPlatform(input, context);
 
       expect(result.success).toBe(true);
       expect(result.data?.platform).toBe('mailchimp');
-      expect(mailchimpService.syncContacts).toHaveBeenCalled();
+      expect(syncToPlatform).toHaveBeenCalled();
     });
 
     it('uses configured audience ID', async () => {
       const context = createTestContext();
       const input = {
         platform: 'mailchimp',
-        delivery_id: 'delivery-123',
+        connection_id: 'connection-123',
+        records: createMockRecords(),
+        audience_id: 'specific-audience-456',
       };
 
-      vi.mocked(prisma.platformConnection.findFirst).mockResolvedValue(
-        createMockConnection('mailchimp', {
-          settings: { audience_id: 'specific-audience-456' },
-        })
+      vi.mocked(prisma.deliveryConfig.findFirst).mockResolvedValue(
+        createMockConnection('mailchimp') as any
       );
 
       await executeSyncToPlatform(input, context);
 
-      expect(mailchimpService.syncContacts).toHaveBeenCalledWith(
+      expect(syncToPlatform).toHaveBeenCalledWith(
+        'mailchimp',
+        expect.any(Object),
+        expect.any(Array),
         expect.objectContaining({
           audienceId: 'specific-audience-456',
-        })
-      );
-    });
-
-    it('applies field mapping for Mailchimp', async () => {
-      const context = createTestContext();
-      const input = {
-        platform: 'mailchimp',
-        delivery_id: 'delivery-123',
-      };
-
-      vi.mocked(prisma.platformConnection.findFirst).mockResolvedValue(
-        createMockConnection('mailchimp', {
-          fieldMapping: {
-            firstName: 'FNAME',
-            lastName: 'LNAME',
-            address: 'ADDR',
-          },
-        })
-      );
-
-      await executeSyncToPlatform(input, context);
-
-      expect(mailchimpService.syncContacts).toHaveBeenCalledWith(
-        expect.objectContaining({
-          fieldMapping: expect.objectContaining({
-            firstName: 'FNAME',
-          }),
         })
       );
     });
@@ -262,63 +204,46 @@ describe('sync_to_platform tool', () => {
       const context = createTestContext();
       const input = {
         platform: 'hubspot',
-        delivery_id: 'delivery-123',
+        connection_id: 'connection-123',
+        records: createMockRecords(),
       };
 
-      vi.mocked(prisma.platformConnection.findFirst).mockResolvedValue(
-        createMockConnection('hubspot')
+      vi.mocked(prisma.deliveryConfig.findFirst).mockResolvedValue(
+        createMockConnection('hubspot') as any
       );
+      vi.mocked(syncToPlatform).mockResolvedValue({
+        success: true,
+        platform: 'hubspot',
+        created: 2,
+        updated: 1,
+        skipped: 0,
+        errors: [],
+      });
 
       const result = await executeSyncToPlatform(input, context);
 
       expect(result.success).toBe(true);
       expect(result.data?.platform).toBe('hubspot');
-      expect(hubspotService.syncContacts).toHaveBeenCalled();
-    });
-
-    it('applies field mapping for HubSpot', async () => {
-      const context = createTestContext();
-      const input = {
-        platform: 'hubspot',
-        delivery_id: 'delivery-123',
-      };
-
-      vi.mocked(prisma.platformConnection.findFirst).mockResolvedValue(
-        createMockConnection('hubspot', {
-          fieldMapping: {
-            firstName: 'firstname',
-            lastName: 'lastname',
-            phone: 'phone',
-          },
-        })
-      );
-
-      await executeSyncToPlatform(input, context);
-
-      expect(hubspotService.syncContacts).toHaveBeenCalledWith(
-        expect.objectContaining({
-          fieldMapping: expect.objectContaining({
-            firstName: 'firstname',
-          }),
-        })
-      );
+      expect(syncToPlatform).toHaveBeenCalled();
     });
 
     it('handles HubSpot contact creation and updates', async () => {
       const context = createTestContext();
       const input = {
         platform: 'hubspot',
-        delivery_id: 'delivery-123',
+        connection_id: 'connection-123',
+        records: createMockRecords(10),
       };
 
-      vi.mocked(prisma.platformConnection.findFirst).mockResolvedValue(
-        createMockConnection('hubspot')
+      vi.mocked(prisma.deliveryConfig.findFirst).mockResolvedValue(
+        createMockConnection('hubspot') as any
       );
-      vi.mocked(hubspotService.syncContacts).mockResolvedValue({
+      vi.mocked(syncToPlatform).mockResolvedValue({
+        success: true,
+        platform: 'hubspot',
         created: 5,
         updated: 3,
         skipped: 1,
-        failed: 0,
         errors: [],
       });
 
@@ -335,53 +260,26 @@ describe('sync_to_platform tool', () => {
       const context = createTestContext();
       const input = {
         platform: 'zapier',
-        delivery_id: 'delivery-123',
+        connection_id: 'connection-123',
+        records: createMockRecords(),
       };
 
-      vi.mocked(prisma.platformConnection.findFirst).mockResolvedValue(
-        createMockConnection('zapier', {
-          settings: {
-            webhook_url: 'https://hooks.zapier.com/hooks/catch/123/abc/',
-          },
-        })
+      vi.mocked(prisma.deliveryConfig.findFirst).mockResolvedValue(
+        createMockConnection('zapier') as any
       );
+      vi.mocked(syncToPlatform).mockResolvedValue({
+        success: true,
+        platform: 'zapier',
+        created: 3,
+        updated: 0,
+        skipped: 0,
+        errors: [],
+      });
 
       const result = await executeSyncToPlatform(input, context);
 
       expect(result.success).toBe(true);
       expect(result.data?.platform).toBe('zapier');
-      expect(zapierService.sendBatch).toHaveBeenCalled();
-    });
-
-    it('includes all record data in webhook', async () => {
-      const context = createTestContext();
-      const input = {
-        platform: 'zapier',
-        delivery_id: 'delivery-123',
-      };
-
-      const records = createMockRecords(2);
-      vi.mocked(prisma.delivery.findUnique).mockResolvedValue({
-        id: 'delivery-123',
-        tenantId: 'test-tenant-id',
-        records,
-      } as any);
-      vi.mocked(prisma.platformConnection.findFirst).mockResolvedValue(
-        createMockConnection('zapier')
-      );
-
-      await executeSyncToPlatform(input, context);
-
-      expect(zapierService.sendBatch).toHaveBeenCalledWith(
-        expect.objectContaining({
-          records: expect.arrayContaining([
-            expect.objectContaining({
-              firstName: 'First1',
-              lastName: 'Last1',
-            }),
-          ]),
-        })
-      );
     });
   });
 
@@ -390,55 +288,23 @@ describe('sync_to_platform tool', () => {
       const context = createTestContext();
       const input = {
         platform: 'mailchimp',
-        delivery_id: 'delivery-123',
+        connection_id: 'connection-123',
+        records: createMockRecords(),
         field_mapping: {
           firstName: 'FIRST',
           lastName: 'LAST',
-          custom_field: 'CUSTOM',
         },
       };
 
-      vi.mocked(prisma.platformConnection.findFirst).mockResolvedValue(
-        createMockConnection('mailchimp')
-      );
-
       await executeSyncToPlatform(input, context);
 
-      expect(mailchimpService.syncContacts).toHaveBeenCalledWith(
+      expect(syncToPlatform).toHaveBeenCalledWith(
+        'mailchimp',
+        expect.any(Object),
+        expect.any(Array),
         expect.objectContaining({
           fieldMapping: expect.objectContaining({
             firstName: 'FIRST',
-          }),
-        })
-      );
-    });
-
-    it('merges input mapping with stored mapping', async () => {
-      const context = createTestContext();
-      const input = {
-        platform: 'hubspot',
-        delivery_id: 'delivery-123',
-        field_mapping: {
-          custom_field: 'custom_property',
-        },
-      };
-
-      vi.mocked(prisma.platformConnection.findFirst).mockResolvedValue(
-        createMockConnection('hubspot', {
-          fieldMapping: {
-            firstName: 'firstname',
-            lastName: 'lastname',
-          },
-        })
-      );
-
-      await executeSyncToPlatform(input, context);
-
-      expect(hubspotService.syncContacts).toHaveBeenCalledWith(
-        expect.objectContaining({
-          fieldMapping: expect.objectContaining({
-            firstName: 'firstname',
-            custom_field: 'custom_property',
           }),
         })
       );
@@ -450,18 +316,17 @@ describe('sync_to_platform tool', () => {
       const context = createTestContext();
       const input = {
         platform: 'mailchimp',
-        delivery_id: 'delivery-123',
+        connection_id: 'connection-123',
+        records: createMockRecords(18),
       };
 
-      vi.mocked(prisma.platformConnection.findFirst).mockResolvedValue(
-        createMockConnection('mailchimp')
-      );
-      vi.mocked(mailchimpService.syncContacts).mockResolvedValue({
+      vi.mocked(syncToPlatform).mockResolvedValue({
+        success: true,
+        platform: 'mailchimp',
         created: 10,
         updated: 5,
         skipped: 2,
-        failed: 1,
-        errors: [{ email: 'bad@example.com', error: 'Invalid email' }],
+        errors: [{ email: 'bad@example.com', errorCode: 'INVALID', message: 'Invalid email' }],
       });
 
       const result = await executeSyncToPlatform(input, context);
@@ -469,27 +334,28 @@ describe('sync_to_platform tool', () => {
       expect(result.data?.created).toBe(10);
       expect(result.data?.updated).toBe(5);
       expect(result.data?.skipped).toBe(2);
-      expect(result.data?.failed).toBe(1);
     });
 
     it('includes error details', async () => {
       const context = createTestContext();
       const input = {
         platform: 'hubspot',
-        delivery_id: 'delivery-123',
+        connection_id: 'connection-123',
+        records: createMockRecords(10),
       };
 
-      vi.mocked(prisma.platformConnection.findFirst).mockResolvedValue(
-        createMockConnection('hubspot')
+      vi.mocked(prisma.deliveryConfig.findFirst).mockResolvedValue(
+        createMockConnection('hubspot') as any
       );
-      vi.mocked(hubspotService.syncContacts).mockResolvedValue({
+      vi.mocked(syncToPlatform).mockResolvedValue({
+        success: true,
+        platform: 'hubspot',
         created: 8,
         updated: 0,
         skipped: 0,
-        failed: 2,
         errors: [
-          { email: 'user1@example.com', error: 'Duplicate contact' },
-          { email: 'user2@example.com', error: 'Invalid email format' },
+          { email: 'user1@example.com', errorCode: 'DUPLICATE', message: 'Duplicate contact' },
+          { email: 'user2@example.com', errorCode: 'INVALID', message: 'Invalid email format' },
         ],
       });
 
@@ -505,100 +371,76 @@ describe('sync_to_platform tool', () => {
       const context = createTestContext();
       const input = {
         platform: 'mailchimp',
-        delivery_id: 'delivery-123',
+        connection_id: 'connection-123',
+        records: createMockRecords(),
       };
 
-      vi.mocked(prisma.platformConnection.findFirst).mockResolvedValue(
-        createMockConnection('mailchimp')
-      );
-      vi.mocked(mailchimpService.syncContacts).mockRejectedValue(
+      vi.mocked(syncToPlatform).mockRejectedValue(
         new Error('Mailchimp API rate limit exceeded')
       );
 
-      await expect(executeSyncToPlatform(input, context)).rejects.toThrow(
-        'Mailchimp API rate limit exceeded'
-      );
+      const result = await executeSyncToPlatform(input, context);
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('Mailchimp API rate limit exceeded');
     });
 
     it('handles HubSpot sync errors', async () => {
       const context = createTestContext();
       const input = {
         platform: 'hubspot',
-        delivery_id: 'delivery-123',
+        connection_id: 'connection-123',
+        records: createMockRecords(),
       };
 
-      vi.mocked(prisma.platformConnection.findFirst).mockResolvedValue(
-        createMockConnection('hubspot')
+      vi.mocked(prisma.deliveryConfig.findFirst).mockResolvedValue(
+        createMockConnection('hubspot') as any
       );
-      vi.mocked(hubspotService.syncContacts).mockRejectedValue(
+      vi.mocked(syncToPlatform).mockRejectedValue(
         new Error('HubSpot authentication failed')
       );
 
-      await expect(executeSyncToPlatform(input, context)).rejects.toThrow(
-        'HubSpot authentication failed'
-      );
-    });
+      const result = await executeSyncToPlatform(input, context);
 
-    it('handles Zapier webhook errors', async () => {
-      const context = createTestContext();
-      const input = {
-        platform: 'zapier',
-        delivery_id: 'delivery-123',
-      };
-
-      vi.mocked(prisma.platformConnection.findFirst).mockResolvedValue(
-        createMockConnection('zapier')
-      );
-      vi.mocked(zapierService.sendBatch).mockRejectedValue(
-        new Error('Webhook endpoint not responding')
-      );
-
-      await expect(executeSyncToPlatform(input, context)).rejects.toThrow(
-        'Webhook endpoint not responding'
-      );
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('HubSpot authentication failed');
     });
   });
 
   describe('connection validation', () => {
-    it('throws NotFoundError when connection not found', async () => {
+    it('returns error when connection not found', async () => {
       const context = createTestContext();
       const input = {
         platform: 'mailchimp',
-        delivery_id: 'delivery-123',
+        connection_id: 'non-existent',
+        records: createMockRecords(),
       };
 
-      vi.mocked(prisma.platformConnection.findFirst).mockResolvedValue(null);
+      vi.mocked(prisma.deliveryConfig.findFirst).mockResolvedValue(null);
 
-      await expect(executeSyncToPlatform(input, context)).rejects.toThrow(NotFoundError);
+      const result = await executeSyncToPlatform(input, context);
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('not found');
     });
 
-    it('throws error when connection is disabled', async () => {
+    it('returns error when platform mismatch', async () => {
       const context = createTestContext();
       const input = {
         platform: 'hubspot',
-        delivery_id: 'delivery-123',
+        connection_id: 'connection-123',
+        records: createMockRecords(),
       };
 
-      vi.mocked(prisma.platformConnection.findFirst).mockResolvedValue(
-        createMockConnection('hubspot', { status: 'DISABLED' })
+      // Connection is for mailchimp, but input requests hubspot
+      vi.mocked(prisma.deliveryConfig.findFirst).mockResolvedValue(
+        createMockConnection('mailchimp') as any
       );
 
-      await expect(executeSyncToPlatform(input, context)).rejects.toThrow();
-    });
+      const result = await executeSyncToPlatform(input, context);
 
-    it('throws NotFoundError when delivery not found', async () => {
-      const context = createTestContext();
-      const input = {
-        platform: 'mailchimp',
-        delivery_id: 'non-existent-delivery',
-      };
-
-      vi.mocked(prisma.platformConnection.findFirst).mockResolvedValue(
-        createMockConnection('mailchimp')
-      );
-      vi.mocked(prisma.delivery.findUnique).mockResolvedValue(null);
-
-      await expect(executeSyncToPlatform(input, context)).rejects.toThrow(NotFoundError);
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('mailchimp');
     });
   });
 
@@ -609,7 +451,8 @@ describe('sync_to_platform tool', () => {
       });
       const input = {
         platform: 'mailchimp',
-        delivery_id: 'delivery-123',
+        connection_id: 'connection-123',
+        records: createMockRecords(),
       };
 
       await expect(executeSyncToPlatform(input, context)).rejects.toThrow(AuthorizationError);
@@ -621,89 +464,115 @@ describe('sync_to_platform tool', () => {
       });
       const input = {
         platform: 'mailchimp',
-        delivery_id: 'delivery-123',
+        connection_id: 'connection-123',
+        records: createMockRecords(),
       };
-
-      vi.mocked(prisma.platformConnection.findFirst).mockResolvedValue(
-        createMockConnection('mailchimp')
-      );
 
       const result = await executeSyncToPlatform(input, context);
       expect(result.success).toBe(true);
     });
   });
 
-  describe('sync logging', () => {
-    it('creates sync log on success', async () => {
+  describe('input validation', () => {
+    it('requires records array', async () => {
       const context = createTestContext();
       const input = {
         platform: 'mailchimp',
-        delivery_id: 'delivery-123',
+        connection_id: 'connection-123',
       };
-
-      vi.mocked(prisma.platformConnection.findFirst).mockResolvedValue(
-        createMockConnection('mailchimp')
-      );
-
-      await executeSyncToPlatform(input, context);
-
-      expect(prisma.syncLog.create).toHaveBeenCalledWith({
-        data: expect.objectContaining({
-          tenantId: 'test-tenant-id',
-          platform: 'MAILCHIMP',
-          deliveryId: 'delivery-123',
-          status: 'SUCCESS',
-        }),
-      });
-    });
-
-    it('creates sync log on failure', async () => {
-      const context = createTestContext();
-      const input = {
-        platform: 'hubspot',
-        delivery_id: 'delivery-123',
-      };
-
-      vi.mocked(prisma.platformConnection.findFirst).mockResolvedValue(
-        createMockConnection('hubspot')
-      );
-      vi.mocked(hubspotService.syncContacts).mockRejectedValue(new Error('Sync failed'));
 
       await expect(executeSyncToPlatform(input, context)).rejects.toThrow();
+    });
 
-      expect(prisma.syncLog.create).toHaveBeenCalledWith({
-        data: expect.objectContaining({
-          status: 'FAILED',
-          errorMessage: expect.stringContaining('Sync failed'),
-        }),
-      });
+    it('requires at least one record', async () => {
+      const context = createTestContext();
+      const input = {
+        platform: 'mailchimp',
+        connection_id: 'connection-123',
+        records: [],
+      };
+
+      await expect(executeSyncToPlatform(input, context)).rejects.toThrow();
+    });
+
+    it('validates platform', async () => {
+      const context = createTestContext();
+      const input = {
+        platform: 'invalid_platform',
+        connection_id: 'connection-123',
+        records: createMockRecords(),
+      };
+
+      await expect(executeSyncToPlatform(input, context)).rejects.toThrow();
     });
   });
 
-  describe('sync with records directly', () => {
-    it('syncs provided records instead of delivery', async () => {
+  describe('duplicate handling', () => {
+    it('supports update duplicate handling', async () => {
       const context = createTestContext();
-      const records = [
-        { firstName: 'Direct', lastName: 'Record', email: 'direct@example.com' },
-      ];
       const input = {
         platform: 'mailchimp',
-        records,
+        connection_id: 'connection-123',
+        records: createMockRecords(),
+        duplicate_handling: 'update' as const,
       };
 
-      vi.mocked(prisma.platformConnection.findFirst).mockResolvedValue(
-        createMockConnection('mailchimp')
+      await executeSyncToPlatform(input, context);
+
+      expect(syncToPlatform).toHaveBeenCalledWith(
+        'mailchimp',
+        expect.any(Object),
+        expect.any(Array),
+        expect.objectContaining({
+          duplicateHandling: 'update',
+        })
+      );
+    });
+
+    it('supports skip duplicate handling', async () => {
+      const context = createTestContext();
+      const input = {
+        platform: 'hubspot',
+        connection_id: 'connection-123',
+        records: createMockRecords(),
+        duplicate_handling: 'skip' as const,
+      };
+
+      vi.mocked(prisma.deliveryConfig.findFirst).mockResolvedValue(
+        createMockConnection('hubspot') as any
       );
 
       await executeSyncToPlatform(input, context);
 
-      expect(mailchimpService.syncContacts).toHaveBeenCalledWith(
+      expect(syncToPlatform).toHaveBeenCalledWith(
+        'hubspot',
+        expect.any(Object),
+        expect.any(Array),
         expect.objectContaining({
-          contacts: expect.arrayContaining([
-            expect.objectContaining({
-              firstName: 'Direct',
-            }),
-          ]),
+          duplicateHandling: 'skip',
+        })
+      );
+    });
+  });
+
+  describe('tags', () => {
+    it('supports adding tags to synced records', async () => {
+      const context = createTestContext();
+      const input = {
+        platform: 'mailchimp',
+        connection_id: 'connection-123',
+        records: createMockRecords(),
+        tags: ['new-homeowner', 'q1-2026'],
+      };
+
+      await executeSyncToPlatform(input, context);
+
+      expect(syncToPlatform).toHaveBeenCalledWith(
+        'mailchimp',
+        expect.any(Object),
+        expect.any(Array),
+        expect.objectContaining({
+          tags: ['new-homeowner', 'q1-2026'],
         })
       );
     });

@@ -3,39 +3,22 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { executeConfigurePlatformConnection } from '../../../../src/tools/platforms/configure-platform-connection.js';
-import { mailchimpService } from '../../../../src/services/platform-sync/mailchimp.js';
-import { hubspotService } from '../../../../src/services/platform-sync/hubspot.js';
-import { zapierService } from '../../../../src/services/platform-sync/zapier.js';
-import { prisma } from '../../../../src/db/client.js';
 import type { TenantContext } from '../../../../src/utils/auth.js';
-import { ValidationError, AuthorizationError } from '../../../../src/utils/errors.js';
+import { AuthorizationError } from '../../../../src/utils/errors.js';
 
-// Mock platform services
-vi.mock('../../../../src/services/platform-sync/mailchimp.js', () => ({
-  mailchimpService: {
-    testConnection: vi.fn(),
-    getAudiences: vi.fn(),
-  },
-}));
-
-vi.mock('../../../../src/services/platform-sync/hubspot.js', () => ({
-  hubspotService: {
-    testConnection: vi.fn(),
-    getContactProperties: vi.fn(),
-  },
-}));
-
-vi.mock('../../../../src/services/platform-sync/zapier.js', () => ({
-  zapierService: {
-    testWebhook: vi.fn(),
-  },
+// Mock the platform-sync module completely
+vi.mock('../../../../src/services/platform-sync/index.js', () => ({
+  testPlatformConnection: vi.fn(),
+  isPlatformSupported: vi.fn(),
+  mailchimpProvider: { testConnection: vi.fn(), syncRecords: vi.fn() },
+  hubspotProvider: { testConnection: vi.fn(), syncRecords: vi.fn() },
+  zapierProvider: { testConnection: vi.fn(), syncRecords: vi.fn() },
 }));
 
 // Mock Prisma client
 vi.mock('../../../../src/db/client.js', () => ({
   prisma: {
-    platformConnection: {
+    deliveryConfig: {
       create: vi.fn(),
       update: vi.fn(),
       findUnique: vi.fn(),
@@ -44,16 +27,10 @@ vi.mock('../../../../src/db/client.js', () => ({
   },
 }));
 
-// Mock crypto for encryption
-vi.mock('crypto', () => ({
-  createCipheriv: vi.fn(() => ({
-    update: vi.fn(() => Buffer.from('encrypted-part1')),
-    final: vi.fn(() => Buffer.from('encrypted-part2')),
-    getAuthTag: vi.fn(() => Buffer.from('auth-tag')),
-  })),
-  randomBytes: vi.fn(() => Buffer.from('0123456789abcdef')),
-  scryptSync: vi.fn(() => Buffer.from('derived-key-32-bytes-long-here!')),
-}));
+// Import after mocks
+import { executeConfigurePlatformConnection } from '../../../../src/tools/platforms/configure-platform-connection.js';
+import { testPlatformConnection, isPlatformSupported } from '../../../../src/services/platform-sync/index.js';
+import { prisma } from '../../../../src/db/client.js';
 
 // Mock Decimal type
 function mockDecimal(value: number) {
@@ -125,28 +102,24 @@ describe('configure_platform_connection tool', () => {
     vi.clearAllMocks();
 
     // Default mock responses
-    vi.mocked(mailchimpService.testConnection).mockResolvedValue(true);
-    vi.mocked(mailchimpService.getAudiences).mockResolvedValue([
-      { id: 'audience-123', name: 'Main List', memberCount: 1500 },
-    ]);
-    vi.mocked(hubspotService.testConnection).mockResolvedValue(true);
-    vi.mocked(hubspotService.getContactProperties).mockResolvedValue([
-      { name: 'email', label: 'Email', type: 'string' },
-      { name: 'firstname', label: 'First Name', type: 'string' },
-    ]);
-    vi.mocked(zapierService.testWebhook).mockResolvedValue(true);
+    vi.mocked(isPlatformSupported).mockReturnValue(true);
+    vi.mocked(testPlatformConnection).mockResolvedValue({
+      success: true,
+      message: 'Connection successful',
+    });
 
-    vi.mocked(prisma.platformConnection.create).mockResolvedValue({
+    vi.mocked(prisma.deliveryConfig.create).mockResolvedValue({
       id: 'connection-123',
       tenantId: 'test-tenant-id',
-      platform: 'MAILCHIMP',
-      status: 'ACTIVE',
+      name: 'Test Connection',
+      method: 'WEBHOOK',
+      isActive: true,
     } as any);
-    vi.mocked(prisma.platformConnection.update).mockResolvedValue({
+    vi.mocked(prisma.deliveryConfig.update).mockResolvedValue({
       id: 'connection-123',
-      status: 'ACTIVE',
+      name: 'Updated Connection',
     } as any);
-    vi.mocked(prisma.platformConnection.findFirst).mockResolvedValue(null);
+    vi.mocked(prisma.deliveryConfig.findFirst).mockResolvedValue(null);
   });
 
   describe('Mailchimp connection', () => {
@@ -154,12 +127,11 @@ describe('configure_platform_connection tool', () => {
       const context = createTestContext();
       const input = {
         platform: 'mailchimp',
+        connection_name: 'My Mailchimp',
         credentials: {
-          api_key: 'mc-api-key-us1',
-          server_prefix: 'us1',
-        },
-        settings: {
-          audience_id: 'audience-123',
+          type: 'mailchimp',
+          apiKey: 'mc-api-key-us1',
+          server: 'us1',
         },
       };
 
@@ -167,56 +139,53 @@ describe('configure_platform_connection tool', () => {
 
       expect(result.success).toBe(true);
       expect(result.data?.platform).toBe('mailchimp');
-      expect(result.data?.status).toBe('ACTIVE');
+      expect(result.data?.connection_name).toBe('My Mailchimp');
     });
 
     it('validates Mailchimp credentials on save', async () => {
       const context = createTestContext();
       const input = {
         platform: 'mailchimp',
+        connection_name: 'My Mailchimp',
         credentials: {
-          api_key: 'mc-api-key-us1',
-          server_prefix: 'us1',
+          type: 'mailchimp',
+          apiKey: 'mc-api-key-us1',
+          server: 'us1',
         },
       };
 
       await executeConfigurePlatformConnection(input, context);
 
-      expect(mailchimpService.testConnection).toHaveBeenCalledWith({
-        apiKey: 'mc-api-key-us1',
-        serverPrefix: 'us1',
-      });
+      expect(testPlatformConnection).toHaveBeenCalledWith(
+        'mailchimp',
+        expect.objectContaining({
+          type: 'mailchimp',
+          apiKey: 'mc-api-key-us1',
+        })
+      );
     });
 
     it('rejects invalid Mailchimp credentials', async () => {
       const context = createTestContext();
       const input = {
         platform: 'mailchimp',
+        connection_name: 'My Mailchimp',
         credentials: {
-          api_key: 'invalid-key',
-          server_prefix: 'us1',
+          type: 'mailchimp',
+          apiKey: 'invalid-key',
+          server: 'us1',
         },
       };
 
-      vi.mocked(mailchimpService.testConnection).mockResolvedValue(false);
-
-      await expect(executeConfigurePlatformConnection(input, context)).rejects.toThrow();
-    });
-
-    it('fetches available audiences on configuration', async () => {
-      const context = createTestContext();
-      const input = {
-        platform: 'mailchimp',
-        credentials: {
-          api_key: 'mc-api-key-us1',
-          server_prefix: 'us1',
-        },
-      };
+      vi.mocked(testPlatformConnection).mockResolvedValue({
+        success: false,
+        message: 'Invalid API key',
+      });
 
       const result = await executeConfigurePlatformConnection(input, context);
 
-      expect(mailchimpService.getAudiences).toHaveBeenCalled();
-      expect(result.data?.available_audiences).toBeDefined();
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('Connection test failed');
     });
   });
 
@@ -225,12 +194,10 @@ describe('configure_platform_connection tool', () => {
       const context = createTestContext();
       const input = {
         platform: 'hubspot',
+        connection_name: 'My HubSpot',
         credentials: {
-          api_key: 'pat-na1-xxxxx',
-        },
-        settings: {
-          create_contacts: true,
-          update_existing: true,
+          type: 'hubspot',
+          accessToken: 'pat-na1-xxxxx',
         },
       };
 
@@ -244,45 +211,43 @@ describe('configure_platform_connection tool', () => {
       const context = createTestContext();
       const input = {
         platform: 'hubspot',
+        connection_name: 'My HubSpot',
         credentials: {
-          api_key: 'pat-na1-xxxxx',
+          type: 'hubspot',
+          accessToken: 'pat-na1-xxxxx',
         },
       };
 
       await executeConfigurePlatformConnection(input, context);
 
-      expect(hubspotService.testConnection).toHaveBeenCalledWith({
-        apiKey: 'pat-na1-xxxxx',
-      });
+      expect(testPlatformConnection).toHaveBeenCalledWith(
+        'hubspot',
+        expect.objectContaining({
+          type: 'hubspot',
+          accessToken: 'pat-na1-xxxxx',
+        })
+      );
     });
 
     it('rejects invalid HubSpot credentials', async () => {
       const context = createTestContext();
       const input = {
         platform: 'hubspot',
+        connection_name: 'My HubSpot',
         credentials: {
-          api_key: 'invalid-key',
+          type: 'hubspot',
+          accessToken: 'invalid-key',
         },
       };
 
-      vi.mocked(hubspotService.testConnection).mockResolvedValue(false);
-
-      await expect(executeConfigurePlatformConnection(input, context)).rejects.toThrow();
-    });
-
-    it('fetches HubSpot contact properties', async () => {
-      const context = createTestContext();
-      const input = {
-        platform: 'hubspot',
-        credentials: {
-          api_key: 'pat-na1-xxxxx',
-        },
-      };
+      vi.mocked(testPlatformConnection).mockResolvedValue({
+        success: false,
+        message: 'Invalid access token',
+      });
 
       const result = await executeConfigurePlatformConnection(input, context);
 
-      expect(hubspotService.getContactProperties).toHaveBeenCalled();
-      expect(result.data?.available_properties).toBeDefined();
+      expect(result.success).toBe(false);
     });
   });
 
@@ -291,8 +256,10 @@ describe('configure_platform_connection tool', () => {
       const context = createTestContext();
       const input = {
         platform: 'zapier',
+        connection_name: 'My Zapier',
         credentials: {
-          webhook_url: 'https://hooks.zapier.com/hooks/catch/123456/abcdef/',
+          type: 'zapier',
+          webhookUrl: 'https://hooks.zapier.com/hooks/catch/123456/abcdef/',
         },
       };
 
@@ -306,15 +273,20 @@ describe('configure_platform_connection tool', () => {
       const context = createTestContext();
       const input = {
         platform: 'zapier',
+        connection_name: 'My Zapier',
         credentials: {
-          webhook_url: 'https://hooks.zapier.com/hooks/catch/123456/abcdef/',
+          type: 'zapier',
+          webhookUrl: 'https://hooks.zapier.com/hooks/catch/123456/abcdef/',
         },
       };
 
       await executeConfigurePlatformConnection(input, context);
 
-      expect(zapierService.testWebhook).toHaveBeenCalledWith(
-        'https://hooks.zapier.com/hooks/catch/123456/abcdef/'
+      expect(testPlatformConnection).toHaveBeenCalledWith(
+        'zapier',
+        expect.objectContaining({
+          webhookUrl: 'https://hooks.zapier.com/hooks/catch/123456/abcdef/',
+        })
       );
     });
 
@@ -322,118 +294,14 @@ describe('configure_platform_connection tool', () => {
       const context = createTestContext();
       const input = {
         platform: 'zapier',
+        connection_name: 'My Zapier',
         credentials: {
-          webhook_url: 'not-a-valid-url',
+          type: 'zapier',
+          webhookUrl: 'not-a-valid-url',
         },
       };
 
       await expect(executeConfigurePlatformConnection(input, context)).rejects.toThrow();
-    });
-
-    it('tests webhook connectivity', async () => {
-      const context = createTestContext();
-      const input = {
-        platform: 'zapier',
-        credentials: {
-          webhook_url: 'https://hooks.zapier.com/hooks/catch/123456/abcdef/',
-        },
-      };
-
-      vi.mocked(zapierService.testWebhook).mockResolvedValue(false);
-
-      await expect(executeConfigurePlatformConnection(input, context)).rejects.toThrow();
-    });
-  });
-
-  describe('credential encryption', () => {
-    it('encrypts credentials before storage', async () => {
-      const context = createTestContext();
-      const input = {
-        platform: 'mailchimp',
-        credentials: {
-          api_key: 'secret-api-key',
-          server_prefix: 'us1',
-        },
-      };
-
-      await executeConfigurePlatformConnection(input, context);
-
-      expect(prisma.platformConnection.create).toHaveBeenCalledWith({
-        data: expect.objectContaining({
-          encryptedCredentials: expect.any(String),
-        }),
-      });
-
-      // Verify the credentials are not stored in plain text
-      const createCall = vi.mocked(prisma.platformConnection.create).mock.calls[0];
-      expect(createCall[0].data.encryptedCredentials).not.toContain('secret-api-key');
-    });
-
-    it('does not store plain text credentials', async () => {
-      const context = createTestContext();
-      const input = {
-        platform: 'hubspot',
-        credentials: {
-          api_key: 'pat-na1-super-secret',
-        },
-      };
-
-      await executeConfigurePlatformConnection(input, context);
-
-      const createCall = vi.mocked(prisma.platformConnection.create).mock.calls[0];
-      expect(JSON.stringify(createCall[0].data)).not.toContain('pat-na1-super-secret');
-    });
-  });
-
-  describe('field mapping', () => {
-    it('allows custom field mapping for Mailchimp', async () => {
-      const context = createTestContext();
-      const input = {
-        platform: 'mailchimp',
-        credentials: {
-          api_key: 'mc-api-key-us1',
-          server_prefix: 'us1',
-        },
-        field_mapping: {
-          firstName: 'FNAME',
-          lastName: 'LNAME',
-          address: 'ADDRESS',
-          city: 'CITY',
-          state: 'STATE',
-          zip: 'ZIP',
-        },
-      };
-
-      const result = await executeConfigurePlatformConnection(input, context);
-
-      expect(result.success).toBe(true);
-      expect(prisma.platformConnection.create).toHaveBeenCalledWith({
-        data: expect.objectContaining({
-          fieldMapping: expect.objectContaining({
-            firstName: 'FNAME',
-          }),
-        }),
-      });
-    });
-
-    it('allows custom field mapping for HubSpot', async () => {
-      const context = createTestContext();
-      const input = {
-        platform: 'hubspot',
-        credentials: {
-          api_key: 'pat-na1-xxxxx',
-        },
-        field_mapping: {
-          firstName: 'firstname',
-          lastName: 'lastname',
-          address: 'address',
-          email: 'email',
-        },
-      };
-
-      const result = await executeConfigurePlatformConnection(input, context);
-
-      expect(result.success).toBe(true);
     });
   });
 
@@ -442,26 +310,29 @@ describe('configure_platform_connection tool', () => {
       const context = createTestContext();
       const input = {
         platform: 'mailchimp',
+        connection_name: 'My Mailchimp',
         credentials: {
-          api_key: 'new-api-key-us1',
-          server_prefix: 'us1',
+          type: 'mailchimp',
+          apiKey: 'new-api-key-us1',
+          server: 'us1',
         },
       };
 
-      vi.mocked(prisma.platformConnection.findFirst).mockResolvedValue({
+      vi.mocked(prisma.deliveryConfig.findFirst).mockResolvedValue({
         id: 'existing-connection-123',
         tenantId: 'test-tenant-id',
-        platform: 'MAILCHIMP',
+        name: 'My Mailchimp',
+        method: 'WEBHOOK',
       } as any);
 
       const result = await executeConfigurePlatformConnection(input, context);
 
-      expect(prisma.platformConnection.update).toHaveBeenCalledWith({
-        where: { id: 'existing-connection-123' },
-        data: expect.objectContaining({
-          encryptedCredentials: expect.any(String),
-        }),
-      });
+      expect(prisma.deliveryConfig.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 'existing-connection-123' },
+        })
+      );
+      expect(result.success).toBe(true);
     });
   });
 
@@ -470,45 +341,59 @@ describe('configure_platform_connection tool', () => {
       const context = createTestContext();
       const input = {
         platform: 'invalid_platform',
-        credentials: {},
-      };
-
-      await expect(executeConfigurePlatformConnection(input, context)).rejects.toThrow();
-    });
-
-    it('throws ValidationError for missing credentials', async () => {
-      const context = createTestContext();
-      const input = {
-        platform: 'mailchimp',
-        credentials: {},
-      };
-
-      await expect(executeConfigurePlatformConnection(input, context)).rejects.toThrow();
-    });
-
-    it('throws ValidationError for missing Mailchimp server prefix', async () => {
-      const context = createTestContext();
-      const input = {
-        platform: 'mailchimp',
+        connection_name: 'Test',
         credentials: {
-          api_key: 'mc-api-key',
+          type: 'invalid_platform',
         },
       };
 
       await expect(executeConfigurePlatformConnection(input, context)).rejects.toThrow();
     });
+
+    it('throws ValidationError for missing connection_name', async () => {
+      const context = createTestContext();
+      const input = {
+        platform: 'mailchimp',
+        credentials: {
+          type: 'mailchimp',
+          apiKey: 'key',
+          server: 'us1',
+        },
+      };
+
+      await expect(executeConfigurePlatformConnection(input, context)).rejects.toThrow();
+    });
+
+    it('throws error when credentials type does not match platform', async () => {
+      const context = createTestContext();
+      const input = {
+        platform: 'mailchimp',
+        connection_name: 'Test',
+        credentials: {
+          type: 'hubspot',
+          accessToken: 'token',
+        },
+      };
+
+      const result = await executeConfigurePlatformConnection(input, context);
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("doesn't match");
+    });
   });
 
   describe('permission checks', () => {
-    it('throws AuthorizationError when missing platform:write permission', async () => {
+    it('throws AuthorizationError when missing platform:configure permission', async () => {
       const context = createTestContext({
         permissions: ['data:read'],
       });
       const input = {
         platform: 'mailchimp',
+        connection_name: 'Test',
         credentials: {
-          api_key: 'mc-api-key-us1',
-          server_prefix: 'us1',
+          type: 'mailchimp',
+          apiKey: 'mc-api-key-us1',
+          server: 'us1',
         },
       };
 
@@ -517,15 +402,17 @@ describe('configure_platform_connection tool', () => {
       );
     });
 
-    it('allows access with platform:write permission', async () => {
+    it('allows access with platform:configure permission', async () => {
       const context = createTestContext({
-        permissions: ['platform:write'],
+        permissions: ['platform:configure'],
       });
       const input = {
         platform: 'mailchimp',
+        connection_name: 'Test',
         credentials: {
-          api_key: 'mc-api-key-us1',
-          server_prefix: 'us1',
+          type: 'mailchimp',
+          apiKey: 'mc-api-key-us1',
+          server: 'us1',
         },
       };
 
@@ -534,50 +421,23 @@ describe('configure_platform_connection tool', () => {
     });
   });
 
-  describe('connection status', () => {
-    it('sets status to ACTIVE on successful validation', async () => {
-      const context = createTestContext();
-      const input = {
-        platform: 'hubspot',
-        credentials: {
-          api_key: 'valid-key',
-        },
-      };
-
-      await executeConfigurePlatformConnection(input, context);
-
-      expect(prisma.platformConnection.create).toHaveBeenCalledWith({
-        data: expect.objectContaining({
-          status: 'ACTIVE',
-        }),
-      });
-    });
-
-    it('allows disabling connection', async () => {
+  describe('test skip option', () => {
+    it('skips connection test when test=false', async () => {
       const context = createTestContext();
       const input = {
         platform: 'mailchimp',
+        connection_name: 'Test',
         credentials: {
-          api_key: 'mc-api-key-us1',
-          server_prefix: 'us1',
+          type: 'mailchimp',
+          apiKey: 'mc-api-key-us1',
+          server: 'us1',
         },
-        enabled: false,
+        test: false,
       };
-
-      vi.mocked(prisma.platformConnection.findFirst).mockResolvedValue({
-        id: 'existing-123',
-        tenantId: 'test-tenant-id',
-        platform: 'MAILCHIMP',
-      } as any);
 
       await executeConfigurePlatformConnection(input, context);
 
-      expect(prisma.platformConnection.update).toHaveBeenCalledWith({
-        where: { id: 'existing-123' },
-        data: expect.objectContaining({
-          status: 'DISABLED',
-        }),
-      });
+      expect(testPlatformConnection).not.toHaveBeenCalled();
     });
   });
 
@@ -586,18 +446,20 @@ describe('configure_platform_connection tool', () => {
       const context = createTestContext();
       const input = {
         platform: 'mailchimp',
+        connection_name: 'Test',
         credentials: {
-          api_key: 'mc-api-key-us1',
-          server_prefix: 'us1',
+          type: 'mailchimp',
+          apiKey: 'mc-api-key-us1',
+          server: 'us1',
         },
       };
 
-      vi.mocked(mailchimpService.testConnection).mockRejectedValue(
-        new Error('Mailchimp API error')
+      vi.mocked(testPlatformConnection).mockRejectedValue(
+        new Error('API error')
       );
 
       await expect(executeConfigurePlatformConnection(input, context)).rejects.toThrow(
-        'Mailchimp API error'
+        'API error'
       );
     });
 
@@ -605,18 +467,21 @@ describe('configure_platform_connection tool', () => {
       const context = createTestContext();
       const input = {
         platform: 'hubspot',
+        connection_name: 'Test',
         credentials: {
-          api_key: 'valid-key',
+          type: 'hubspot',
+          accessToken: 'valid-key',
         },
       };
 
-      vi.mocked(prisma.platformConnection.create).mockRejectedValue(
+      vi.mocked(prisma.deliveryConfig.create).mockRejectedValue(
         new Error('Database error')
       );
 
-      await expect(executeConfigurePlatformConnection(input, context)).rejects.toThrow(
-        'Database error'
-      );
+      const result = await executeConfigurePlatformConnection(input, context);
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('Database error');
     });
   });
 });

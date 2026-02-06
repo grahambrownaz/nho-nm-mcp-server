@@ -2,32 +2,83 @@
  * Tests for HubSpot Platform Sync Service
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import axios from 'axios';
+import { describe, it, expect, vi, beforeEach, afterEach, type Mock } from 'vitest';
+import type {
+  HubSpotCredentials,
+  SyncRecord,
+  SyncOptions,
+} from '../../../../src/services/platform-sync/interface.js';
+
+// Create mock functions using vi.hoisted so they are available in vi.mock
+const mocks = vi.hoisted(() => {
+  const mockGetPage = vi.fn();
+  const mockCreate = vi.fn();
+  const mockUpdate = vi.fn();
+  const mockDoSearch = vi.fn();
+  const mockBatchCreate = vi.fn();
+  const mockBatchUpdate = vi.fn();
+  const mockGetAll = vi.fn();
+
+  return {
+    mockGetPage,
+    mockCreate,
+    mockUpdate,
+    mockDoSearch,
+    mockBatchCreate,
+    mockBatchUpdate,
+    mockGetAll,
+    createMockClient: () => ({
+      crm: {
+        contacts: {
+          basicApi: {
+            getPage: mockGetPage,
+            create: mockCreate,
+            update: mockUpdate,
+          },
+          searchApi: {
+            doSearch: mockDoSearch,
+          },
+          batchApi: {
+            create: mockBatchCreate,
+            update: mockBatchUpdate,
+          },
+        },
+        properties: {
+          coreApi: {
+            getAll: mockGetAll,
+          },
+        },
+      },
+    }),
+  };
+});
+
+// Mock the HubSpot API client
+vi.mock('@hubspot/api-client', () => {
+  return {
+    Client: class MockClient {
+      crm: any;
+      constructor() {
+        const client = mocks.createMockClient();
+        this.crm = client.crm;
+      }
+    },
+  };
+});
+
+// Import after mocking
 import {
-  HubSpotService,
-  hubspotService,
+  HubSpotSyncProvider,
+  hubspotProvider,
 } from '../../../../src/services/platform-sync/hubspot.js';
 
-// Mock axios
-vi.mock('axios', () => ({
-  default: {
-    create: vi.fn(() => ({
-      get: vi.fn(),
-      post: vi.fn(),
-      patch: vi.fn(),
-      delete: vi.fn(),
-    })),
-  },
-}));
-
-// Create mock contact
-function createMockContact(overrides: Record<string, unknown> = {}) {
+// Create mock record
+function createMockRecord(overrides: Partial<SyncRecord> = {}): SyncRecord {
   return {
     email: 'test@example.com',
     firstName: 'John',
     lastName: 'Smith',
-    address: '123 Main Street',
+    addressLine1: '123 Main Street',
     city: 'Phoenix',
     state: 'AZ',
     zip: '85001',
@@ -37,455 +88,423 @@ function createMockContact(overrides: Record<string, unknown> = {}) {
   };
 }
 
-describe('HubSpot Service', () => {
-  let service: HubSpotService;
-  let mockAxiosInstance: {
-    get: ReturnType<typeof vi.fn>;
-    post: ReturnType<typeof vi.fn>;
-    patch: ReturnType<typeof vi.fn>;
-    delete: ReturnType<typeof vi.fn>;
+// Create mock credentials
+function createMockCredentials(overrides: Partial<HubSpotCredentials> = {}): HubSpotCredentials {
+  return {
+    type: 'hubspot',
+    accessToken: 'pat-na1-test-api-key',
+    ...overrides,
   };
+}
+
+describe('HubSpotSyncProvider', () => {
+  let provider: HubSpotSyncProvider;
 
   beforeEach(() => {
     vi.clearAllMocks();
+    provider = new HubSpotSyncProvider();
 
-    mockAxiosInstance = {
-      get: vi.fn(),
-      post: vi.fn(),
-      patch: vi.fn(),
-      delete: vi.fn(),
-    };
-
-    vi.mocked(axios.create).mockReturnValue(mockAxiosInstance as any);
-
-    service = new HubSpotService({
-      apiKey: 'pat-na1-test-api-key',
-    });
+    // Reset all mock implementations to defaults
+    mocks.mockGetPage.mockResolvedValue({ results: [] });
+    mocks.mockCreate.mockResolvedValue({ id: 'new-contact' });
+    mocks.mockUpdate.mockResolvedValue({ id: 'updated-contact' });
+    mocks.mockDoSearch.mockResolvedValue({ results: [] });
+    mocks.mockBatchCreate.mockResolvedValue({ results: [] });
+    mocks.mockBatchUpdate.mockResolvedValue({ results: [] });
+    mocks.mockGetAll.mockResolvedValue({ results: [] });
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
   });
 
-  describe('testConnection', () => {
-    it('validates API key with successful request', async () => {
-      mockAxiosInstance.get.mockResolvedValue({
-        data: {
-          portalId: 12345,
-          timeZone: 'America/New_York',
-        },
-      });
-
-      const result = await service.testConnection({
-        apiKey: 'pat-na1-valid-key',
-      });
-
-      expect(result).toBe(true);
-      expect(mockAxiosInstance.get).toHaveBeenCalledWith('/account-info/v3/details');
-    });
-
-    it('returns false for invalid API key', async () => {
-      mockAxiosInstance.get.mockRejectedValue({
-        response: {
-          status: 401,
-          data: {
-            message: 'The API key is invalid',
-          },
-        },
-      });
-
-      const result = await service.testConnection({
-        apiKey: 'invalid-key',
-      });
-
-      expect(result).toBe(false);
-    });
-
-    it('handles network errors', async () => {
-      mockAxiosInstance.get.mockRejectedValue(new Error('Network Error'));
-
-      const result = await service.testConnection({
-        apiKey: 'test-key',
-      });
-
-      expect(result).toBe(false);
+  describe('platform identifier', () => {
+    it('has correct platform value', () => {
+      expect(provider.platform).toBe('hubspot');
     });
   });
 
-  describe('createContacts', () => {
-    it('creates new contacts', async () => {
-      mockAxiosInstance.post.mockResolvedValue({
-        data: {
-          id: 'contact-123',
-          properties: {
-            email: 'test@example.com',
-            firstname: 'John',
-            lastname: 'Smith',
-          },
-        },
+  describe('testConnection', () => {
+    it('validates credentials with successful request', async () => {
+      mocks.mockGetPage.mockResolvedValue({
+        results: [{ id: '1' }],
       });
 
-      const contact = createMockContact();
-      const result = await service.createContacts([contact]);
+      const credentials = createMockCredentials();
+      const result = await provider.testConnection(credentials);
 
-      expect(result.created).toBe(1);
-      expect(mockAxiosInstance.post).toHaveBeenCalledWith(
-        '/crm/v3/objects/contacts',
-        expect.objectContaining({
-          properties: expect.objectContaining({
-            email: 'test@example.com',
-          }),
-        })
-      );
+      expect(result.success).toBe(true);
+      expect(result.message).toContain('Successfully connected');
+      expect(result.details?.hasContacts).toBe(true);
     });
 
-    it('maps fields to HubSpot properties', async () => {
-      mockAxiosInstance.post.mockResolvedValue({
-        data: { id: 'contact-123' },
+    it('returns success with no contacts', async () => {
+      mocks.mockGetPage.mockResolvedValue({
+        results: [],
       });
 
-      const contact = createMockContact({
-        firstName: 'Jane',
-        lastName: 'Doe',
-        phone: '4805551234',
-      });
+      const credentials = createMockCredentials();
+      const result = await provider.testConnection(credentials);
 
-      await service.createContacts([contact], {
-        fieldMapping: {
-          firstName: 'firstname',
-          lastName: 'lastname',
-          phone: 'phone',
-          address: 'address',
-          city: 'city',
-          state: 'state',
-          zip: 'zip',
-        },
-      });
-
-      expect(mockAxiosInstance.post).toHaveBeenCalledWith(
-        '/crm/v3/objects/contacts',
-        expect.objectContaining({
-          properties: expect.objectContaining({
-            firstname: 'Jane',
-            lastname: 'Doe',
-            phone: '4805551234',
-          }),
-        })
-      );
+      expect(result.success).toBe(true);
+      expect(result.details?.hasContacts).toBe(false);
     });
 
-    it('handles multiple contacts', async () => {
-      mockAxiosInstance.post.mockResolvedValue({
-        data: { id: 'contact' },
+    it('returns false for invalid credentials', async () => {
+      mocks.mockGetPage.mockRejectedValue(
+        new Error('The API key is invalid')
+      );
+
+      const credentials = createMockCredentials();
+      const result = await provider.testConnection(credentials);
+
+      expect(result.success).toBe(false);
+      expect(result.message).toContain('API key is invalid');
+    });
+
+    it('rejects invalid credentials type', async () => {
+      const invalidCredentials = {
+        type: 'zapier',
+        webhookUrl: 'https://test.com',
+      } as any;
+
+      const result = await provider.testConnection(invalidCredentials);
+
+      expect(result.success).toBe(false);
+      expect(result.message).toContain('Invalid credentials type');
+    });
+  });
+
+  describe('syncRecords', () => {
+    it('creates new contacts when none exist', async () => {
+      mocks.mockDoSearch.mockResolvedValue({ results: [] });
+      mocks.mockBatchCreate.mockResolvedValue({
+        results: [{ id: '1' }, { id: '2' }],
       });
 
-      const contacts = [
-        createMockContact({ email: 'user1@example.com' }),
-        createMockContact({ email: 'user2@example.com' }),
-        createMockContact({ email: 'user3@example.com' }),
+      const credentials = createMockCredentials();
+      const records = [
+        createMockRecord({ email: 'user1@example.com' }),
+        createMockRecord({ email: 'user2@example.com' }),
       ];
 
-      const result = await service.createContacts(contacts);
+      const result = await provider.syncRecords(credentials, records);
 
-      expect(result.created).toBe(3);
-      expect(mockAxiosInstance.post).toHaveBeenCalledTimes(3);
+      expect(result.platform).toBe('hubspot');
+      expect(result.created).toBe(2);
+      expect(mocks.mockBatchCreate).toHaveBeenCalled();
     });
-  });
 
-  describe('updateContacts', () => {
+    it('handles missing email gracefully', async () => {
+      const credentials = createMockCredentials();
+      const records = [
+        createMockRecord({ email: undefined }),
+      ];
+
+      const result = await provider.syncRecords(credentials, records);
+
+      expect(result.errors.some(e => e.errorCode === 'MISSING_EMAIL')).toBe(true);
+    });
+
+    it('rejects invalid credentials type', async () => {
+      const invalidCredentials = {
+        type: 'zapier',
+        webhookUrl: 'https://test.com',
+      } as any;
+
+      const records = [createMockRecord()];
+      const result = await provider.syncRecords(invalidCredentials, records);
+
+      expect(result.success).toBe(false);
+      expect(result.errors[0].errorCode).toBe('INVALID_CREDENTIALS');
+    });
+
     it('updates existing contacts', async () => {
-      // Search returns existing contact
-      mockAxiosInstance.post.mockResolvedValueOnce({
-        data: {
-          results: [
-            {
-              id: 'contact-123',
-              properties: { email: 'test@example.com' },
-            },
-          ],
-        },
+      mocks.mockDoSearch.mockResolvedValue({
+        results: [{ id: 'existing-123', properties: { email: 'test@example.com' } }],
+      });
+      mocks.mockBatchUpdate.mockResolvedValue({
+        results: [{ id: 'existing-123' }],
       });
 
-      // Update succeeds
-      mockAxiosInstance.patch.mockResolvedValue({
-        data: {
-          id: 'contact-123',
-          properties: { firstname: 'Updated' },
-        },
+      const credentials = createMockCredentials();
+      const records = [createMockRecord()];
+
+      const result = await provider.syncRecords(credentials, records, {
+        duplicateHandling: 'update',
       });
 
-      const contact = createMockContact({ firstName: 'Updated' });
-      const result = await service.updateContacts([contact]);
-
+      expect(result.platform).toBe('hubspot');
       expect(result.updated).toBe(1);
-      expect(mockAxiosInstance.patch).toHaveBeenCalledWith(
-        '/crm/v3/objects/contacts/contact-123',
-        expect.objectContaining({
-          properties: expect.objectContaining({
-            firstname: 'Updated',
-          }),
-        })
-      );
+      expect(mocks.mockBatchUpdate).toHaveBeenCalled();
     });
 
-    it('maps fields to HubSpot properties on update', async () => {
-      mockAxiosInstance.post.mockResolvedValueOnce({
-        data: {
-          results: [{ id: 'contact-123' }],
-        },
-      });
-      mockAxiosInstance.patch.mockResolvedValue({
-        data: { id: 'contact-123' },
+    it('skips duplicates when configured', async () => {
+      mocks.mockDoSearch.mockResolvedValue({
+        results: [{ id: 'existing-123', properties: { email: 'test@example.com' } }],
       });
 
-      const contact = createMockContact({
-        address: '789 New Address',
-        city: 'Scottsdale',
+      const credentials = createMockCredentials();
+      const records = [createMockRecord()];
+
+      const result = await provider.syncRecords(credentials, records, {
+        duplicateHandling: 'skip',
       });
-
-      await service.updateContacts([contact], {
-        fieldMapping: {
-          address: 'address',
-          city: 'city',
-        },
-      });
-
-      expect(mockAxiosInstance.patch).toHaveBeenCalledWith(
-        expect.any(String),
-        expect.objectContaining({
-          properties: expect.objectContaining({
-            address: '789 New Address',
-            city: 'Scottsdale',
-          }),
-        })
-      );
-    });
-
-    it('creates contact if not found for update', async () => {
-      // Search returns no results
-      mockAxiosInstance.post.mockResolvedValueOnce({
-        data: { results: [] },
-      });
-
-      // Create succeeds
-      mockAxiosInstance.post.mockResolvedValueOnce({
-        data: { id: 'new-contact-123' },
-      });
-
-      const contact = createMockContact();
-      const result = await service.updateContacts([contact], { createIfNotFound: true });
-
-      expect(result.created).toBe(1);
-    });
-  });
-
-  describe('HubSpot API errors', () => {
-    it('handles rate limiting', async () => {
-      mockAxiosInstance.post.mockRejectedValue({
-        response: {
-          status: 429,
-          data: {
-            message: 'You have reached your secondly limit',
-          },
-        },
-      });
-
-      const contact = createMockContact();
-
-      await expect(service.createContacts([contact])).rejects.toThrow('rate');
-    });
-
-    it('handles duplicate contact error', async () => {
-      mockAxiosInstance.post.mockRejectedValue({
-        response: {
-          status: 409,
-          data: {
-            message: 'Contact already exists',
-            category: 'CONFLICT',
-          },
-        },
-      });
-
-      const contact = createMockContact();
-      const result = await service.createContacts([contact]);
 
       expect(result.skipped).toBe(1);
+      expect(mocks.mockBatchCreate).not.toHaveBeenCalled();
+      expect(mocks.mockBatchUpdate).not.toHaveBeenCalled();
     });
 
-    it('handles invalid property error', async () => {
-      mockAxiosInstance.post.mockRejectedValue({
-        response: {
-          status: 400,
-          data: {
-            message: 'Property values were not valid',
-            errors: [
-              {
-                message: 'Property "invalid_prop" does not exist',
-              },
-            ],
-          },
-        },
-      });
+    it('processes records in batches of 100', async () => {
+      mocks.mockDoSearch.mockResolvedValue({ results: [] });
+      mocks.mockBatchCreate.mockResolvedValue({ results: [] });
 
-      const contact = createMockContact();
-      const result = await service.createContacts([contact], {
-        fieldMapping: {
-          custom: 'invalid_prop',
-        },
-      });
+      const credentials = createMockCredentials();
+      const records = Array.from({ length: 150 }, (_, i) =>
+        createMockRecord({ email: `user${i}@example.com` })
+      );
 
-      expect(result.failed).toBe(1);
-      expect(result.errors[0].error).toContain('Property');
+      const result = await provider.syncRecords(credentials, records);
+
+      expect(result.platform).toBe('hubspot');
+      // Should make 2 batch calls (100 + 50)
+      expect(mocks.mockBatchCreate).toHaveBeenCalledTimes(2);
     });
 
-    it('handles authentication errors', async () => {
-      mockAxiosInstance.post.mockRejectedValue({
-        response: {
-          status: 401,
-          data: {
-            message: 'Authentication credentials were invalid',
-          },
-        },
+    it('handles mixed create and update', async () => {
+      // First batch search returns one existing contact
+      mocks.mockDoSearch.mockResolvedValueOnce({
+        results: [{ id: 'existing-1', properties: { email: 'user1@example.com' } }],
       });
 
-      const contact = createMockContact();
+      mocks.mockBatchCreate.mockResolvedValue({ results: [{ id: 'new-1' }] });
+      mocks.mockBatchUpdate.mockResolvedValue({ results: [{ id: 'existing-1' }] });
 
-      await expect(service.createContacts([contact])).rejects.toThrow('Authentication');
-    });
-
-    it('handles server errors', async () => {
-      mockAxiosInstance.post.mockRejectedValue({
-        response: {
-          status: 500,
-          data: {
-            message: 'Internal server error',
-          },
-        },
-      });
-
-      const contact = createMockContact();
-
-      await expect(service.createContacts([contact])).rejects.toThrow();
-    });
-  });
-
-  describe('getContactProperties', () => {
-    it('returns available contact properties', async () => {
-      mockAxiosInstance.get.mockResolvedValue({
-        data: {
-          results: [
-            { name: 'email', label: 'Email', type: 'string' },
-            { name: 'firstname', label: 'First Name', type: 'string' },
-            { name: 'lastname', label: 'Last Name', type: 'string' },
-            { name: 'phone', label: 'Phone Number', type: 'string' },
-          ],
-        },
-      });
-
-      const properties = await service.getContactProperties();
-
-      expect(properties).toHaveLength(4);
-      expect(properties[0].name).toBe('email');
-      expect(properties[0].label).toBe('Email');
-    });
-  });
-
-  describe('syncContacts', () => {
-    it('syncs contacts with create and update', async () => {
-      // Search for existing
-      mockAxiosInstance.post
-        .mockResolvedValueOnce({
-          data: { results: [{ id: 'existing-1' }] },
-        })
-        .mockResolvedValueOnce({
-          data: { results: [] },
-        });
-
-      // Update existing
-      mockAxiosInstance.patch.mockResolvedValue({
-        data: { id: 'existing-1' },
-      });
-
-      // Create new
-      mockAxiosInstance.post.mockResolvedValueOnce({
-        data: { id: 'new-1' },
-      });
-
-      const contacts = [
-        createMockContact({ email: 'existing@example.com' }),
-        createMockContact({ email: 'new@example.com' }),
+      const credentials = createMockCredentials();
+      const records = [
+        createMockRecord({ email: 'user1@example.com' }),
+        createMockRecord({ email: 'user2@example.com' }),
       ];
 
-      const result = await service.syncContacts({
-        contacts,
+      const result = await provider.syncRecords(credentials, records);
+
+      expect(result.platform).toBe('hubspot');
+      expect(result.created).toBe(1);
+      expect(result.updated).toBe(1);
+    });
+  });
+
+  describe('getFields', () => {
+    it('returns available contact properties', async () => {
+      mocks.mockGetAll.mockResolvedValue({
+        results: [
+          { name: 'email', label: 'Email', type: 'string' },
+          { name: 'firstname', label: 'First Name', type: 'string' },
+          { name: 'lastname', label: 'Last Name', type: 'string' },
+          { name: 'phone', label: 'Phone Number', type: 'string' },
+        ],
+      });
+
+      const credentials = createMockCredentials();
+      const fields = await provider.getFields(credentials);
+
+      expect(fields).toHaveLength(4);
+      expect(fields[0].id).toBe('email');
+      expect(fields[0].name).toBe('Email');
+      expect(fields[0].type).toBe('string');
+    });
+
+    it('rejects invalid credentials type', async () => {
+      const invalidCredentials = {
+        type: 'zapier',
+        webhookUrl: 'https://test.com',
+      } as any;
+
+      await expect(provider.getFields(invalidCredentials)).rejects.toThrow(
+        'Invalid credentials type'
+      );
+    });
+  });
+
+  describe('createContact', () => {
+    it('creates a single contact', async () => {
+      mocks.mockCreate.mockResolvedValue({
+        id: 'contact-123',
+        properties: { email: 'test@example.com' },
+      });
+
+      const credentials = createMockCredentials();
+      const record = createMockRecord();
+
+      const result = await provider.createContact(credentials, record);
+
+      expect(result.success).toBe(true);
+      expect(result.contactId).toBe('contact-123');
+    });
+
+    it('handles creation errors', async () => {
+      mocks.mockCreate.mockRejectedValue(
+        new Error('Contact already exists')
+      );
+
+      const credentials = createMockCredentials();
+      const record = createMockRecord();
+
+      const result = await provider.createContact(credentials, record);
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('Contact already exists');
+    });
+  });
+
+  describe('updateContactByEmail', () => {
+    it('updates a contact by email', async () => {
+      mocks.mockDoSearch.mockResolvedValue({
+        results: [{ id: 'contact-123', properties: { email: 'test@example.com' } }],
+      });
+      mocks.mockUpdate.mockResolvedValue({
+        id: 'contact-123',
+        properties: { firstname: 'Updated', lastname: 'Name' },
+      });
+
+      const credentials = createMockCredentials();
+      const email = 'test@example.com';
+      const updates: Partial<SyncRecord> = {
+        firstName: 'Updated',
+        lastName: 'Name',
+      };
+
+      const result = await provider.updateContactByEmail(credentials, email, updates);
+
+      expect(result.success).toBe(true);
+      expect(result.contactId).toBe('contact-123');
+    });
+
+    it('returns error when contact not found', async () => {
+      mocks.mockDoSearch.mockResolvedValue({
+        results: [],
+      });
+
+      const credentials = createMockCredentials();
+      const email = 'notfound@example.com';
+
+      const result = await provider.updateContactByEmail(credentials, email, {});
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('not found');
+    });
+
+    it('handles update errors', async () => {
+      mocks.mockDoSearch.mockResolvedValue({
+        results: [{ id: 'contact-123', properties: { email: 'test@example.com' } }],
+      });
+      mocks.mockUpdate.mockRejectedValue(
+        new Error('Update failed')
+      );
+
+      const credentials = createMockCredentials();
+      const result = await provider.updateContactByEmail(credentials, 'test@example.com', {
+        firstName: 'Updated',
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('Update failed');
+    });
+  });
+
+  describe('field mapping', () => {
+    it('uses custom field mapping', async () => {
+      mocks.mockDoSearch.mockResolvedValue({ results: [] });
+      mocks.mockBatchCreate.mockResolvedValue({ results: [{ id: '1' }] });
+
+      const credentials = createMockCredentials();
+      const records = [createMockRecord()];
+      const options: SyncOptions = {
         fieldMapping: {
-          firstName: 'firstname',
-          lastName: 'lastname',
+          email: 'custom_email',
+          firstName: 'custom_first',
+          lastName: 'custom_last',
         },
-        updateExisting: true,
-      });
+      };
 
-      expect(result.created + result.updated).toBeGreaterThan(0);
+      const result = await provider.syncRecords(credentials, records, options);
+
+      expect(result.platform).toBe('hubspot');
+      // Verify the batch create was called with mapped properties
+      expect(mocks.mockBatchCreate).toHaveBeenCalled();
+    });
+
+    it('uses default field mapping when not provided', async () => {
+      mocks.mockDoSearch.mockResolvedValue({ results: [] });
+      mocks.mockBatchCreate.mockResolvedValue({ results: [{ id: '1' }] });
+
+      const credentials = createMockCredentials();
+      const records = [createMockRecord()];
+
+      const result = await provider.syncRecords(credentials, records);
+
+      expect(result.platform).toBe('hubspot');
+      expect(mocks.mockBatchCreate).toHaveBeenCalled();
     });
   });
 
-  describe('batch operations', () => {
-    it('uses batch API for large contact lists', async () => {
-      mockAxiosInstance.post.mockResolvedValue({
-        data: {
-          status: 'COMPLETE',
-          results: [],
-        },
-      });
-
-      const contacts = Array.from({ length: 100 }, (_, i) =>
-        createMockContact({ email: `user${i}@example.com` })
+  describe('error handling', () => {
+    it('handles batch create failures', async () => {
+      mocks.mockDoSearch.mockResolvedValue({ results: [] });
+      mocks.mockBatchCreate.mockRejectedValue(
+        new Error('Batch create failed')
       );
 
-      await service.createContacts(contacts, { useBatch: true });
+      const credentials = createMockCredentials();
+      const records = [createMockRecord()];
 
-      expect(mockAxiosInstance.post).toHaveBeenCalledWith(
-        '/crm/v3/objects/contacts/batch/create',
-        expect.objectContaining({
-          inputs: expect.any(Array),
-        })
-      );
+      const result = await provider.syncRecords(credentials, records);
+
+      expect(result.errors.some(e => e.errorCode === 'BATCH_CREATE_FAILED')).toBe(true);
     });
-  });
 
-  describe('search contacts', () => {
-    it('searches contacts by email', async () => {
-      mockAxiosInstance.post.mockResolvedValue({
-        data: {
-          results: [
-            {
-              id: 'contact-123',
-              properties: {
-                email: 'test@example.com',
-                firstname: 'John',
-              },
-            },
-          ],
-        },
+    it('handles batch update failures', async () => {
+      mocks.mockDoSearch.mockResolvedValue({
+        results: [{ id: 'existing-123', properties: { email: 'test@example.com' } }],
       });
-
-      const results = await service.searchContacts({ email: 'test@example.com' });
-
-      expect(results).toHaveLength(1);
-      expect(results[0].id).toBe('contact-123');
-      expect(mockAxiosInstance.post).toHaveBeenCalledWith(
-        '/crm/v3/objects/contacts/search',
-        expect.objectContaining({
-          filterGroups: expect.any(Array),
-        })
+      mocks.mockBatchUpdate.mockRejectedValue(
+        new Error('Batch update failed')
       );
+
+      const credentials = createMockCredentials();
+      const records = [createMockRecord()];
+
+      const result = await provider.syncRecords(credentials, records);
+
+      expect(result.errors.some(e => e.errorCode === 'BATCH_UPDATE_FAILED')).toBe(true);
+    });
+
+    it('handles search errors gracefully', async () => {
+      mocks.mockDoSearch.mockRejectedValue(
+        new Error('Search failed')
+      );
+      mocks.mockBatchCreate.mockResolvedValue({ results: [{ id: '1' }] });
+
+      const credentials = createMockCredentials();
+      const records = [createMockRecord()];
+
+      // Should not throw, errors are logged and processing continues
+      const result = await provider.syncRecords(credentials, records);
+      expect(result.platform).toBe('hubspot');
+      // Should still attempt to create since search failed
+      expect(result.created).toBe(1);
     });
   });
 
   describe('singleton instance', () => {
-    it('exports singleton instance', () => {
-      expect(hubspotService).toBeDefined();
-      expect(hubspotService).toBeInstanceOf(HubSpotService);
+    it('exports hubspotProvider singleton', () => {
+      expect(hubspotProvider).toBeDefined();
+      expect(hubspotProvider).toBeInstanceOf(HubSpotSyncProvider);
+    });
+
+    it('singleton has correct platform', () => {
+      expect(hubspotProvider.platform).toBe('hubspot');
     });
   });
 });

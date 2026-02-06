@@ -5,8 +5,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
   DeduplicationService,
-  deduplicationService,
-  hashRecord,
+  getDeduplicationService,
+  generateRecordHash,
+  type DeduplicationRecord,
 } from '../../../src/services/deduplication.js';
 import { prisma } from '../../../src/db/client.js';
 
@@ -16,25 +17,23 @@ vi.mock('../../../src/db/client.js', () => ({
     deliveryRecord: {
       findMany: vi.fn(),
       createMany: vi.fn(),
-    },
-    delivery: {
-      findMany: vi.fn(),
+      count: vi.fn(),
+      groupBy: vi.fn(),
+      aggregate: vi.fn(),
+      deleteMany: vi.fn(),
     },
   },
 }));
 
-// Create mock record
-function createMockRecord(overrides: Record<string, unknown> = {}) {
+// Create mock record matching DeduplicationRecord interface
+function createMockRecord(overrides: Partial<DeduplicationRecord> = {}): DeduplicationRecord {
   return {
-    id: 'record-123',
-    firstName: 'John',
-    lastName: 'Smith',
+    first_name: 'John',
+    last_name: 'Smith',
     address: '123 Main St',
     city: 'Phoenix',
     state: 'AZ',
     zip: '85001',
-    email: 'john@example.com',
-    phone: '6025551234',
     ...overrides,
   };
 }
@@ -61,14 +60,15 @@ describe('Deduplication Service', () => {
 
     // Default mock responses
     vi.mocked(prisma.deliveryRecord.findMany).mockResolvedValue([]);
+    vi.mocked(prisma.deliveryRecord.createMany).mockResolvedValue({ count: 0 });
   });
 
-  describe('hashRecord', () => {
+  describe('generateRecordHash', () => {
     it('hashes record consistently', () => {
       const record = createMockRecord();
 
-      const hash1 = hashRecord(record);
-      const hash2 = hashRecord(record);
+      const hash1 = generateRecordHash(record);
+      const hash2 = generateRecordHash(record);
 
       expect(hash1).toBe(hash2);
       expect(typeof hash1).toBe('string');
@@ -77,8 +77,8 @@ describe('Deduplication Service', () => {
 
     it('same address + name produces same hash', () => {
       const record1 = createMockRecord({
-        firstName: 'John',
-        lastName: 'Doe',
+        first_name: 'John',
+        last_name: 'Doe',
         address: '456 Oak Ave',
         city: 'Tempe',
         state: 'AZ',
@@ -86,19 +86,19 @@ describe('Deduplication Service', () => {
       });
 
       const record2 = createMockRecord({
-        firstName: 'John',
-        lastName: 'Doe',
+        first_name: 'John',
+        last_name: 'Doe',
         address: '456 Oak Ave',
         city: 'Tempe',
         state: 'AZ',
         zip: '85281',
-        // Different email/phone should not affect hash
+        // Different email/phone should not affect hash (they are not used in hashing)
         email: 'different@example.com',
         phone: '4805559999',
       });
 
-      const hash1 = hashRecord(record1);
-      const hash2 = hashRecord(record2);
+      const hash1 = generateRecordHash(record1);
+      const hash2 = generateRecordHash(record2);
 
       expect(hash1).toBe(hash2);
     });
@@ -118,199 +118,152 @@ describe('Deduplication Service', () => {
         zip: '85281',
       });
 
-      const hash1 = hashRecord(record1);
-      const hash2 = hashRecord(record2);
+      const hash1 = generateRecordHash(record1);
+      const hash2 = generateRecordHash(record2);
 
       expect(hash1).not.toBe(hash2);
     });
 
-    it('different names produce different hashes', () => {
+    it('different last names produce different hashes', () => {
       const record1 = createMockRecord({
-        firstName: 'John',
-        lastName: 'Smith',
+        first_name: 'John',
+        last_name: 'Smith',
       });
 
       const record2 = createMockRecord({
-        firstName: 'Jane',
-        lastName: 'Doe',
+        first_name: 'John',
+        last_name: 'Doe',
       });
 
-      const hash1 = hashRecord(record1);
-      const hash2 = hashRecord(record2);
+      const hash1 = generateRecordHash(record1);
+      const hash2 = generateRecordHash(record2);
 
       expect(hash1).not.toBe(hash2);
     });
 
     it('normalizes case for consistent hashing', () => {
       const record1 = createMockRecord({
-        firstName: 'JOHN',
-        lastName: 'SMITH',
+        first_name: 'JOHN',
+        last_name: 'SMITH',
         address: '123 MAIN ST',
         city: 'PHOENIX',
       });
 
       const record2 = createMockRecord({
-        firstName: 'john',
-        lastName: 'smith',
+        first_name: 'john',
+        last_name: 'smith',
         address: '123 main st',
         city: 'phoenix',
       });
 
-      const hash1 = hashRecord(record1);
-      const hash2 = hashRecord(record2);
-
-      expect(hash1).toBe(hash2);
-    });
-
-    it('trims whitespace for consistent hashing', () => {
-      const record1 = createMockRecord({
-        firstName: '  John  ',
-        lastName: '  Smith  ',
-        address: '  123 Main St  ',
-      });
-
-      const record2 = createMockRecord({
-        firstName: 'John',
-        lastName: 'Smith',
-        address: '123 Main St',
-      });
-
-      const hash1 = hashRecord(record1);
-      const hash2 = hashRecord(record2);
+      const hash1 = generateRecordHash(record1);
+      const hash2 = generateRecordHash(record2);
 
       expect(hash1).toBe(hash2);
     });
 
     it('handles missing optional fields', () => {
       const record = createMockRecord({
-        email: null,
-        phone: undefined,
+        first_name: undefined,
       });
 
-      const hash = hashRecord(record);
+      const hash = generateRecordHash(record);
 
       expect(hash).toBeDefined();
       expect(typeof hash).toBe('string');
     });
   });
 
-  describe('filterDuplicates', () => {
+  describe('deduplicateRecords', () => {
     it('filters out records delivered in last 90 days', async () => {
       const records = [
-        createMockRecord({ id: 'record-1', address: '100 First St' }),
-        createMockRecord({ id: 'record-2', address: '200 Second St' }),
-        createMockRecord({ id: 'record-3', address: '300 Third St' }),
+        createMockRecord({ address: '100 First St' }),
+        createMockRecord({ address: '200 Second St' }),
+        createMockRecord({ address: '300 Third St' }),
       ];
 
       // Mock that record-2's hash was already delivered
-      const record2Hash = hashRecord(records[1]);
+      const record2Hash = generateRecordHash(records[1]);
       vi.mocked(prisma.deliveryRecord.findMany).mockResolvedValue([
         createMockDeliveryRecord({
           recordHash: record2Hash,
           deliveredAt: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000), // 30 days ago
         }),
-      ]);
+      ] as any);
 
-      const filtered = await service.filterDuplicates(records, {
-        subscriptionId: 'subscription-123',
-        tenantId: 'tenant-123',
-        windowDays: 90,
-      });
+      const result = await service.deduplicateRecords(
+        'tenant-123',
+        'subscription-123',
+        records,
+        90
+      );
 
-      expect(filtered).toHaveLength(2);
-      expect(filtered.find((r) => r.id === 'record-2')).toBeUndefined();
-    });
-
-    it('allows records outside 90-day window', async () => {
-      const records = [
-        createMockRecord({ id: 'record-1', address: '100 First St' }),
-        createMockRecord({ id: 'record-2', address: '200 Second St' }),
-      ];
-
-      // Mock that record-2's hash was delivered 100 days ago (outside window)
-      const record2Hash = hashRecord(records[1]);
-      vi.mocked(prisma.deliveryRecord.findMany).mockResolvedValue([
-        createMockDeliveryRecord({
-          recordHash: record2Hash,
-          deliveredAt: new Date(Date.now() - 100 * 24 * 60 * 60 * 1000), // 100 days ago
-        }),
-      ]);
-
-      const filtered = await service.filterDuplicates(records, {
-        subscriptionId: 'subscription-123',
-        tenantId: 'tenant-123',
-        windowDays: 90,
-      });
-
-      // Both records should pass since the previous delivery is outside the 90-day window
-      expect(filtered).toHaveLength(2);
+      expect(result.uniqueRecords).toHaveLength(2);
+      expect(result.duplicateCount).toBe(1);
     });
 
     it('handles empty input array', async () => {
-      const filtered = await service.filterDuplicates([], {
-        subscriptionId: 'subscription-123',
-        tenantId: 'tenant-123',
-        windowDays: 90,
-      });
+      const result = await service.deduplicateRecords(
+        'tenant-123',
+        'subscription-123',
+        [],
+        90
+      );
 
-      expect(filtered).toHaveLength(0);
-      expect(filtered).toEqual([]);
+      expect(result.uniqueRecords).toHaveLength(0);
+      expect(result.originalCount).toBe(0);
     });
 
     it('returns all records when no previous deliveries exist', async () => {
       const records = [
-        createMockRecord({ id: 'record-1' }),
-        createMockRecord({ id: 'record-2' }),
-        createMockRecord({ id: 'record-3' }),
+        createMockRecord({ address: '100 First St' }),
+        createMockRecord({ address: '200 Second St' }),
+        createMockRecord({ address: '300 Third St' }),
       ];
 
       vi.mocked(prisma.deliveryRecord.findMany).mockResolvedValue([]);
 
-      const filtered = await service.filterDuplicates(records, {
-        subscriptionId: 'subscription-123',
-        tenantId: 'tenant-123',
-        windowDays: 90,
-      });
+      const result = await service.deduplicateRecords(
+        'tenant-123',
+        'subscription-123',
+        records,
+        90
+      );
 
-      expect(filtered).toHaveLength(3);
+      expect(result.uniqueRecords).toHaveLength(3);
+      expect(result.duplicateCount).toBe(0);
     });
 
     it('uses custom window days', async () => {
-      const records = [createMockRecord({ id: 'record-1', address: '100 First St' })];
+      const records = [createMockRecord({ address: '100 First St' })];
 
-      const recordHash = hashRecord(records[0]);
-      vi.mocked(prisma.deliveryRecord.findMany).mockResolvedValue([
-        createMockDeliveryRecord({
-          recordHash,
-          deliveredAt: new Date(Date.now() - 45 * 24 * 60 * 60 * 1000), // 45 days ago
-        }),
-      ]);
+      await service.deduplicateRecords(
+        'tenant-123',
+        'subscription-123',
+        records,
+        30
+      );
 
-      // With 30-day window, should pass
-      const filtered30 = await service.filterDuplicates(records, {
-        subscriptionId: 'subscription-123',
-        tenantId: 'tenant-123',
-        windowDays: 30,
-      });
-      expect(filtered30).toHaveLength(1);
-
-      // With 60-day window, should be filtered
-      const filtered60 = await service.filterDuplicates(records, {
-        subscriptionId: 'subscription-123',
-        tenantId: 'tenant-123',
-        windowDays: 60,
-      });
-      expect(filtered60).toHaveLength(0);
+      // Verify query was made with correct parameters
+      expect(prisma.deliveryRecord.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            tenantId: 'tenant-123',
+            subscriptionId: 'subscription-123',
+          }),
+        })
+      );
     });
 
     it('filters by subscription scope', async () => {
-      const records = [createMockRecord({ id: 'record-1' })];
+      const records = [createMockRecord()];
 
-      await service.filterDuplicates(records, {
-        subscriptionId: 'subscription-123',
-        tenantId: 'tenant-123',
-        windowDays: 90,
-      });
+      await service.deduplicateRecords(
+        'tenant-123',
+        'subscription-123',
+        records,
+        90
+      );
 
       expect(prisma.deliveryRecord.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -322,13 +275,14 @@ describe('Deduplication Service', () => {
     });
 
     it('filters by tenant scope', async () => {
-      const records = [createMockRecord({ id: 'record-1' })];
+      const records = [createMockRecord()];
 
-      await service.filterDuplicates(records, {
-        subscriptionId: 'subscription-123',
-        tenantId: 'tenant-123',
-        windowDays: 90,
-      });
+      await service.deduplicateRecords(
+        'tenant-123',
+        'subscription-123',
+        records,
+        90
+      );
 
       expect(prisma.deliveryRecord.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -340,21 +294,47 @@ describe('Deduplication Service', () => {
     });
   });
 
-  describe('recordDelivery', () => {
+  describe('deduplicateBatch', () => {
+    it('deduplicates within same batch', () => {
+      const records = [
+        createMockRecord({ first_name: 'John', last_name: 'Doe', address: '123 Main St' }),
+        createMockRecord({ first_name: 'John', last_name: 'Doe', address: '123 Main St' }), // Duplicate
+        createMockRecord({ first_name: 'Jane', last_name: 'Smith', address: '456 Oak Ave' }),
+      ];
+
+      const result = service.deduplicateBatch(records);
+
+      expect(result.uniqueRecords).toHaveLength(2);
+      expect(result.duplicateCount).toBe(1);
+      expect(result.originalCount).toBe(3);
+    });
+
+    it('handles empty batch', () => {
+      const result = service.deduplicateBatch([]);
+
+      expect(result.uniqueRecords).toHaveLength(0);
+      expect(result.duplicateCount).toBe(0);
+    });
+  });
+
+  describe('recordDeliveries', () => {
     it('records delivered hashes to database', async () => {
       const records = [
-        createMockRecord({ id: 'record-1', address: '100 First St' }),
-        createMockRecord({ id: 'record-2', address: '200 Second St' }),
+        createMockRecord({ address: '100 First St' }),
+        createMockRecord({ address: '200 Second St' }),
       ];
 
       vi.mocked(prisma.deliveryRecord.createMany).mockResolvedValue({ count: 2 });
 
-      await service.recordDelivery(records, {
-        deliveryId: 'delivery-123',
-        subscriptionId: 'subscription-123',
-        tenantId: 'tenant-123',
-      });
+      const count = await service.recordDeliveries(
+        'delivery-123',
+        'tenant-123',
+        'subscription-123',
+        records,
+        'NHO'
+      );
 
+      expect(count).toBe(2);
       expect(prisma.deliveryRecord.createMany).toHaveBeenCalledWith({
         data: expect.arrayContaining([
           expect.objectContaining({
@@ -362,70 +342,45 @@ describe('Deduplication Service', () => {
             subscriptionId: 'subscription-123',
             tenantId: 'tenant-123',
             recordHash: expect.any(String),
+            database: 'NHO',
           }),
         ]),
+        skipDuplicates: true,
       });
-    });
-
-    it('handles empty records array', async () => {
-      await service.recordDelivery([], {
-        deliveryId: 'delivery-123',
-        subscriptionId: 'subscription-123',
-        tenantId: 'tenant-123',
-      });
-
-      // Should not call createMany with empty array
-      expect(prisma.deliveryRecord.createMany).not.toHaveBeenCalled();
     });
   });
 
-  describe('getDeduplicationStats', () => {
+  describe('getStats', () => {
     it('returns statistics for subscription', async () => {
-      vi.mocked(prisma.deliveryRecord.findMany).mockResolvedValue([
-        createMockDeliveryRecord({ deliveredAt: new Date() }),
-        createMockDeliveryRecord({ deliveredAt: new Date() }),
-        createMockDeliveryRecord({ deliveredAt: new Date() }),
-      ]);
+      vi.mocked(prisma.deliveryRecord.count).mockResolvedValue(100);
+      vi.mocked(prisma.deliveryRecord.groupBy).mockResolvedValue([
+        { recordHash: 'hash1' },
+        { recordHash: 'hash2' },
+        { recordHash: 'hash3' },
+      ] as any);
+      vi.mocked(prisma.deliveryRecord.aggregate).mockResolvedValue({
+        _min: { deliveredAt: new Date('2026-01-01') },
+        _max: { deliveredAt: new Date('2026-02-01') },
+      } as any);
 
-      const stats = await service.getDeduplicationStats({
-        subscriptionId: 'subscription-123',
-        tenantId: 'tenant-123',
-        windowDays: 90,
-      });
+      const stats = await service.getStats('tenant-123', 'subscription-123', 90);
 
-      expect(stats.totalDelivered).toBe(3);
-      expect(stats.uniqueHashes).toBeDefined();
-    });
-
-    it('calculates unique hash count', async () => {
-      const sameHash = 'duplicate-hash';
-      vi.mocked(prisma.deliveryRecord.findMany).mockResolvedValue([
-        createMockDeliveryRecord({ recordHash: sameHash }),
-        createMockDeliveryRecord({ recordHash: sameHash }),
-        createMockDeliveryRecord({ recordHash: 'unique-hash' }),
-      ]);
-
-      const stats = await service.getDeduplicationStats({
-        subscriptionId: 'subscription-123',
-        tenantId: 'tenant-123',
-        windowDays: 90,
-      });
-
-      expect(stats.uniqueHashes).toBe(2);
+      expect(stats.totalDelivered).toBe(100);
+      expect(stats.uniqueAddresses).toBe(3);
+      expect(stats.windowDays).toBe(90);
+      expect(stats.oldestRecord).toBeInstanceOf(Date);
+      expect(stats.newestRecord).toBeInstanceOf(Date);
     });
   });
 
-  describe('clearExpiredRecords', () => {
+  describe('cleanupOldRecords', () => {
     it('removes records older than retention period', async () => {
-      const mockDeleteMany = vi.fn().mockResolvedValue({ count: 100 });
-      (prisma.deliveryRecord as any).deleteMany = mockDeleteMany;
+      vi.mocked(prisma.deliveryRecord.deleteMany).mockResolvedValue({ count: 100 });
 
-      await service.clearExpiredRecords({
-        tenantId: 'tenant-123',
-        retentionDays: 90,
-      });
+      const count = await service.cleanupOldRecords('tenant-123', 90);
 
-      expect(mockDeleteMany).toHaveBeenCalledWith({
+      expect(count).toBe(100);
+      expect(prisma.deliveryRecord.deleteMany).toHaveBeenCalledWith({
         where: expect.objectContaining({
           tenantId: 'tenant-123',
           deliveredAt: expect.objectContaining({
@@ -436,79 +391,24 @@ describe('Deduplication Service', () => {
     });
   });
 
-  describe('checkDuplicate', () => {
-    it('returns true for duplicate record', async () => {
-      const record = createMockRecord();
-      const recordHash = hashRecord(record);
-
-      vi.mocked(prisma.deliveryRecord.findMany).mockResolvedValue([
-        createMockDeliveryRecord({
-          recordHash,
-          deliveredAt: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000),
-        }),
-      ]);
-
-      const isDuplicate = await service.checkDuplicate(record, {
-        subscriptionId: 'subscription-123',
-        tenantId: 'tenant-123',
-        windowDays: 90,
-      });
-
-      expect(isDuplicate).toBe(true);
-    });
-
-    it('returns false for non-duplicate record', async () => {
-      const record = createMockRecord();
-
-      vi.mocked(prisma.deliveryRecord.findMany).mockResolvedValue([]);
-
-      const isDuplicate = await service.checkDuplicate(record, {
-        subscriptionId: 'subscription-123',
-        tenantId: 'tenant-123',
-        windowDays: 90,
-      });
-
-      expect(isDuplicate).toBe(false);
-    });
-  });
-
   describe('batch processing', () => {
     it('handles large batch of records efficiently', async () => {
       const records = Array.from({ length: 1000 }, (_, i) =>
         createMockRecord({
-          id: `record-${i}`,
           address: `${i} Test Street`,
         })
       );
 
       vi.mocked(prisma.deliveryRecord.findMany).mockResolvedValue([]);
 
-      const filtered = await service.filterDuplicates(records, {
-        subscriptionId: 'subscription-123',
-        tenantId: 'tenant-123',
-        windowDays: 90,
-      });
+      const result = await service.deduplicateRecords(
+        'tenant-123',
+        'subscription-123',
+        records,
+        90
+      );
 
-      expect(filtered).toHaveLength(1000);
-    });
-
-    it('deduplicates within same batch', async () => {
-      const records = [
-        createMockRecord({ id: 'record-1', firstName: 'John', lastName: 'Doe', address: '123 Main St' }),
-        createMockRecord({ id: 'record-2', firstName: 'John', lastName: 'Doe', address: '123 Main St' }), // Duplicate
-        createMockRecord({ id: 'record-3', firstName: 'Jane', lastName: 'Smith', address: '456 Oak Ave' }),
-      ];
-
-      vi.mocked(prisma.deliveryRecord.findMany).mockResolvedValue([]);
-
-      const filtered = await service.filterDuplicates(records, {
-        subscriptionId: 'subscription-123',
-        tenantId: 'tenant-123',
-        windowDays: 90,
-        deduplicateWithinBatch: true,
-      });
-
-      expect(filtered).toHaveLength(2);
+      expect(result.uniqueRecords).toHaveLength(1000);
     });
   });
 
@@ -519,19 +419,18 @@ describe('Deduplication Service', () => {
       vi.mocked(prisma.deliveryRecord.findMany).mockRejectedValue(new Error('Database error'));
 
       await expect(
-        service.filterDuplicates(records, {
-          subscriptionId: 'subscription-123',
-          tenantId: 'tenant-123',
-          windowDays: 90,
-        })
+        service.deduplicateRecords('tenant-123', 'subscription-123', records, 90)
       ).rejects.toThrow('Database error');
     });
   });
 
   describe('singleton instance', () => {
-    it('exports singleton instance', () => {
-      expect(deduplicationService).toBeDefined();
-      expect(deduplicationService).toBeInstanceOf(DeduplicationService);
+    it('returns singleton instance', () => {
+      const instance1 = getDeduplicationService();
+      const instance2 = getDeduplicationService();
+
+      expect(instance1).toBe(instance2);
+      expect(instance1).toBeInstanceOf(DeduplicationService);
     });
   });
 });

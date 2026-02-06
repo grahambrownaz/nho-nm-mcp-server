@@ -1,718 +1,518 @@
 /**
  * Integration Tests for Purchase Fulfillment Flow
+ * Tests the fulfillListPurchase function which handles fulfilling list purchases after payment
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { prisma } from '../../src/db/client.js';
-import { handleStripeWebhook } from '../../src/webhooks/stripe.js';
-import { purchaseFulfillment } from '../../src/services/purchase-fulfillment.js';
-import { dataProvider } from '../../src/services/data-provider.js';
-import { exportGenerator } from '../../src/services/export-generator.js';
-import { emailService } from '../../src/services/email.js';
-import { sftpService } from '../../src/services/sftp.js';
+import { fulfillListPurchase } from '../../src/services/purchase-fulfillment.js';
+import * as exportGenerator from '../../src/services/export-generator.js';
 
-// Mock all dependencies
+// Mock Prisma client
 vi.mock('../../src/db/client.js', () => ({
   prisma: {
-    purchase: {
+    listPurchase: {
       findUnique: vi.fn(),
       update: vi.fn(),
     },
-    delivery: {
+    exportFile: {
       create: vi.fn(),
     },
-    export: {
-      create: vi.fn(),
-    },
-    $transaction: vi.fn((callback) => callback(prisma)),
+    $transaction: vi.fn((callback: (tx: typeof prisma) => Promise<unknown>) => callback(prisma)),
   },
 }));
 
-vi.mock('../../src/services/data-provider.js', () => ({
-  dataProvider: {
-    query: vi.fn(),
-    getRecords: vi.fn(),
-  },
-}));
-
+// Mock export generator
 vi.mock('../../src/services/export-generator.js', () => ({
-  exportGenerator: {
-    toCSV: vi.fn(),
-    toExcel: vi.fn(),
-    toJSON: vi.fn(),
-    uploadToS3: vi.fn(),
-    generateSignedUrl: vi.fn(),
-  },
+  generateExport: vi.fn(),
+  generateLocalExport: vi.fn(),
+  isS3Configured: vi.fn(),
+  getDownloadUrl: vi.fn(),
 }));
 
-vi.mock('../../src/services/email.js', () => ({
-  emailService: {
-    send: vi.fn(),
-    sendWithAttachment: vi.fn(),
-  },
-}));
+// Mock fetch for webhook delivery
+const mockFetch = vi.fn();
+global.fetch = mockFetch;
 
-vi.mock('../../src/services/sftp.js', () => ({
-  sftpService: {
-    upload: vi.fn(),
-    connect: vi.fn(),
-    disconnect: vi.fn(),
-  },
-}));
-
-vi.mock('../../src/services/webhook.js', () => ({
-  webhookService: {
-    send: vi.fn(),
-  },
-}));
-
-import { webhookService } from '../../src/services/webhook.js';
-
-// Create mock purchase
+// Create mock purchase matching actual Prisma schema
 function createMockPurchase(overrides: Record<string, unknown> = {}) {
   return {
     id: 'purchase-123',
     tenantId: 'tenant-123',
-    status: 'pending',
-    query: {
-      database: 'nho',
-      geography: {
-        type: 'state',
-        values: ['AZ'],
-      },
-      filters: {
-        sale_price_min: 200000,
-        sale_price_max: 500000,
-      },
+    tenant: {
+      id: 'tenant-123',
+      name: 'Test Tenant',
+      email: 'test@example.com',
     },
-    recordCount: 5000,
-    totalAmount: 25000,
+    database: 'nho',
+    geography: {
+      type: 'state',
+      values: ['AZ'],
+    },
+    filters: {
+      sale_price_min: 200000,
+      sale_price_max: 500000,
+    },
+    recordCount: 100,
+    withEmail: 0,
+    withPhone: 0,
+    basePrice: 500,
+    emailAppendPrice: 0,
+    phoneAppendPrice: 0,
+    totalPrice: 500,
     exportFormat: 'csv',
     deliveryMethod: 'email',
     deliveryConfig: {
       email: 'customer@example.com',
     },
+    paymentStatus: 'AWAITING_PAYMENT',
+    stripePaymentLinkId: null,
+    stripeSessionId: null,
+    downloadUrl: null,
+    downloadExpires: null,
+    deliveredAt: null,
+    quoteValidUntil: new Date(Date.now() + 24 * 60 * 60 * 1000),
     createdAt: new Date(),
     updatedAt: new Date(),
     ...overrides,
   };
 }
 
-// Create mock records
-function createMockRecords(count: number = 100) {
-  return Array.from({ length: count }, (_, i) => ({
-    id: `record-${i + 1}`,
-    firstName: `First${i + 1}`,
-    lastName: `Last${i + 1}`,
-    email: `user${i + 1}@example.com`,
-    address: `${100 + i} Main Street`,
-    city: 'Phoenix',
-    state: 'AZ',
-    zip: '85001',
-    saleDate: '2026-01-15',
-    salePrice: 350000 + i * 1000,
-  }));
-}
-
 describe('Purchase Fulfillment Integration', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // Default: S3 not configured (local development mode)
+    vi.mocked(exportGenerator.isS3Configured).mockReturnValue(false);
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
   });
 
-  describe('payment webhook triggers fulfillment', () => {
-    it('triggers fulfillment on successful payment', async () => {
+  describe('fulfillListPurchase', () => {
+    it('skips fulfillment if purchase not found', async () => {
+      vi.mocked(prisma.listPurchase.findUnique).mockResolvedValue(null);
+
+      await fulfillListPurchase('non-existent-id');
+
+      expect(prisma.listPurchase.update).not.toHaveBeenCalled();
+    });
+
+    it('skips fulfillment if already completed', async () => {
+      const mockPurchase = createMockPurchase({
+        paymentStatus: 'COMPLETED',
+      });
+      vi.mocked(prisma.listPurchase.findUnique).mockResolvedValue(mockPurchase as any);
+
+      await fulfillListPurchase('purchase-123');
+
+      expect(prisma.listPurchase.update).not.toHaveBeenCalled();
+    });
+
+    it('updates status to PROCESSING when starting fulfillment', async () => {
       const mockPurchase = createMockPurchase();
-      vi.mocked(prisma.purchase.findUnique).mockResolvedValue(mockPurchase);
-      vi.mocked(prisma.purchase.update).mockResolvedValue({
-        ...mockPurchase,
-        status: 'processing',
+      vi.mocked(prisma.listPurchase.findUnique).mockResolvedValue(mockPurchase as any);
+      vi.mocked(prisma.listPurchase.update).mockResolvedValue(mockPurchase as any);
+      vi.mocked(prisma.exportFile.create).mockResolvedValue({ id: 'export-123' } as any);
+      vi.mocked(exportGenerator.generateLocalExport).mockResolvedValue({
+        buffer: Buffer.from('csv data'),
+        contentType: 'text/csv',
+        filename: 'test.csv',
       });
 
-      const mockRecords = createMockRecords(5000);
-      vi.mocked(dataProvider.query).mockResolvedValue(mockRecords);
-      vi.mocked(exportGenerator.toCSV).mockResolvedValue(Buffer.from('csv data'));
-      vi.mocked(exportGenerator.uploadToS3).mockResolvedValue('s3://bucket/file.csv');
-      vi.mocked(exportGenerator.generateSignedUrl).mockResolvedValue('https://download.url');
-      vi.mocked(emailService.send).mockResolvedValue({ success: true });
-      vi.mocked(prisma.delivery.create).mockResolvedValue({
-        id: 'delivery-123',
-        purchaseId: 'purchase-123',
+      await fulfillListPurchase('purchase-123');
+
+      expect(prisma.listPurchase.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 'purchase-123' },
+          data: { paymentStatus: 'PROCESSING' },
+        })
+      );
+    });
+
+    it('generates local export when S3 is not configured', async () => {
+      const mockPurchase = createMockPurchase();
+      vi.mocked(prisma.listPurchase.findUnique).mockResolvedValue(mockPurchase as any);
+      vi.mocked(prisma.listPurchase.update).mockResolvedValue(mockPurchase as any);
+      vi.mocked(prisma.exportFile.create).mockResolvedValue({ id: 'export-123' } as any);
+      vi.mocked(exportGenerator.isS3Configured).mockReturnValue(false);
+      vi.mocked(exportGenerator.generateLocalExport).mockResolvedValue({
+        buffer: Buffer.from('csv data'),
+        contentType: 'text/csv',
+        filename: 'nho_purchase-123.csv',
       });
 
-      // Simulate Stripe webhook
-      const stripeEvent = {
-        type: 'checkout.session.completed',
-        data: {
-          object: {
-            id: 'cs_test123',
-            payment_status: 'paid',
-            metadata: {
-              type: 'list_purchase',
-              purchaseId: 'purchase-123',
-              tenantId: 'tenant-123',
-            },
-          },
-        },
-      };
+      await fulfillListPurchase('purchase-123');
 
-      await handleStripeWebhook(stripeEvent);
+      expect(exportGenerator.generateLocalExport).toHaveBeenCalledWith(
+        expect.objectContaining({
+          format: 'csv',
+          filename: expect.stringContaining('purchase-123'),
+        })
+      );
+    });
 
-      expect(prisma.purchase.update).toHaveBeenCalledWith(
+    it('generates S3 export when S3 is configured', async () => {
+      const mockPurchase = createMockPurchase();
+      vi.mocked(prisma.listPurchase.findUnique).mockResolvedValue(mockPurchase as any);
+      vi.mocked(prisma.listPurchase.update).mockResolvedValue(mockPurchase as any);
+      vi.mocked(prisma.exportFile.create).mockResolvedValue({ id: 'export-123' } as any);
+      vi.mocked(exportGenerator.isS3Configured).mockReturnValue(true);
+      vi.mocked(exportGenerator.generateExport).mockResolvedValue({
+        s3Key: 's3://bucket/file.csv',
+        downloadUrl: 'https://download.url',
+        downloadExpires: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+        fileSizeBytes: 1024,
+      });
+
+      await fulfillListPurchase('purchase-123');
+
+      expect(exportGenerator.generateExport).toHaveBeenCalledWith(
+        expect.objectContaining({
+          format: 'csv',
+          filename: expect.stringContaining('purchase-123'),
+        })
+      );
+    });
+
+    it('creates export file record', async () => {
+      const mockPurchase = createMockPurchase();
+      vi.mocked(prisma.listPurchase.findUnique).mockResolvedValue(mockPurchase as any);
+      vi.mocked(prisma.listPurchase.update).mockResolvedValue(mockPurchase as any);
+      vi.mocked(prisma.exportFile.create).mockResolvedValue({ id: 'export-123' } as any);
+      vi.mocked(exportGenerator.generateLocalExport).mockResolvedValue({
+        buffer: Buffer.from('csv data'),
+        contentType: 'text/csv',
+        filename: 'test.csv',
+      });
+
+      await fulfillListPurchase('purchase-123');
+
+      expect(prisma.exportFile.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            tenantId: 'tenant-123',
+            sourceType: 'list_purchase',
+            sourceId: 'purchase-123',
+            format: 'csv',
+            listPurchaseId: 'purchase-123',
+          }),
+        })
+      );
+    });
+
+    it('marks purchase as COMPLETED on success', async () => {
+      const mockPurchase = createMockPurchase();
+      vi.mocked(prisma.listPurchase.findUnique).mockResolvedValue(mockPurchase as any);
+      vi.mocked(prisma.listPurchase.update).mockResolvedValue(mockPurchase as any);
+      vi.mocked(prisma.exportFile.create).mockResolvedValue({ id: 'export-123' } as any);
+      vi.mocked(exportGenerator.generateLocalExport).mockResolvedValue({
+        buffer: Buffer.from('csv data'),
+        contentType: 'text/csv',
+        filename: 'test.csv',
+      });
+
+      await fulfillListPurchase('purchase-123');
+
+      // The second update should mark as COMPLETED
+      expect(prisma.listPurchase.update).toHaveBeenLastCalledWith(
         expect.objectContaining({
           where: { id: 'purchase-123' },
           data: expect.objectContaining({
-            status: 'processing',
+            paymentStatus: 'COMPLETED',
+            deliveredAt: expect.any(Date),
           }),
         })
       );
     });
 
-    it('marks purchase as paid', async () => {
+    it('marks purchase as FAILED on error', async () => {
       const mockPurchase = createMockPurchase();
-      vi.mocked(prisma.purchase.findUnique).mockResolvedValue(mockPurchase);
-      vi.mocked(prisma.purchase.update).mockResolvedValue({
-        ...mockPurchase,
-        status: 'paid',
-        paidAt: new Date(),
-      });
+      vi.mocked(prisma.listPurchase.findUnique).mockResolvedValue(mockPurchase as any);
+      vi.mocked(prisma.listPurchase.update).mockResolvedValue(mockPurchase as any);
+      vi.mocked(exportGenerator.generateLocalExport).mockRejectedValue(new Error('Export failed'));
 
-      const stripeEvent = {
-        type: 'checkout.session.completed',
-        data: {
-          object: {
-            id: 'cs_test456',
-            payment_status: 'paid',
-            metadata: {
-              type: 'list_purchase',
-              purchaseId: 'purchase-123',
-            },
-          },
-        },
-      };
+      await expect(fulfillListPurchase('purchase-123')).rejects.toThrow('Export failed');
 
-      await handleStripeWebhook(stripeEvent);
-
-      expect(prisma.purchase.update).toHaveBeenCalledWith(
+      expect(prisma.listPurchase.update).toHaveBeenLastCalledWith(
         expect.objectContaining({
-          data: expect.objectContaining({
-            paidAt: expect.any(Date),
-          }),
-        })
-      );
-    });
-
-    it('stores Stripe payment intent ID', async () => {
-      const mockPurchase = createMockPurchase();
-      vi.mocked(prisma.purchase.findUnique).mockResolvedValue(mockPurchase);
-      vi.mocked(prisma.purchase.update).mockResolvedValue(mockPurchase);
-
-      const stripeEvent = {
-        type: 'checkout.session.completed',
-        data: {
-          object: {
-            id: 'cs_test789',
-            payment_status: 'paid',
-            payment_intent: 'pi_test123',
-            metadata: {
-              type: 'list_purchase',
-              purchaseId: 'purchase-123',
-            },
-          },
-        },
-      };
-
-      await handleStripeWebhook(stripeEvent);
-
-      expect(prisma.purchase.update).toHaveBeenCalledWith(
-        expect.objectContaining({
-          data: expect.objectContaining({
-            stripePaymentIntentId: 'pi_test123',
-          }),
+          where: { id: 'purchase-123' },
+          data: { paymentStatus: 'FAILED' },
         })
       );
     });
   });
 
-  describe('queries data correctly', () => {
-    it('executes query from purchase', async () => {
+  describe('delivery methods', () => {
+    it('delivers via webhook when configured', async () => {
       const mockPurchase = createMockPurchase({
-        query: {
-          database: 'nho',
-          geography: { type: 'state', values: ['CA', 'NV'] },
-          filters: {
-            sale_price_min: 300000,
-            property_type: ['Single Family'],
-          },
+        deliveryMethod: 'webhook',
+        deliveryConfig: {
+          webhook_url: 'https://api.customer.com/data-webhook',
         },
       });
+      vi.mocked(prisma.listPurchase.findUnique).mockResolvedValue(mockPurchase as any);
+      vi.mocked(prisma.listPurchase.update).mockResolvedValue(mockPurchase as any);
+      vi.mocked(prisma.exportFile.create).mockResolvedValue({ id: 'export-123' } as any);
+      vi.mocked(exportGenerator.generateLocalExport).mockResolvedValue({
+        buffer: Buffer.from('csv data'),
+        contentType: 'text/csv',
+        filename: 'test.csv',
+      });
+      mockFetch.mockResolvedValue({ ok: true });
 
-      vi.mocked(prisma.purchase.findUnique).mockResolvedValue(mockPurchase);
-      vi.mocked(dataProvider.query).mockResolvedValue(createMockRecords(1000));
-      vi.mocked(exportGenerator.toCSV).mockResolvedValue(Buffer.from('csv'));
-      vi.mocked(exportGenerator.uploadToS3).mockResolvedValue('s3://bucket/file.csv');
-      vi.mocked(exportGenerator.generateSignedUrl).mockResolvedValue('https://url');
-      vi.mocked(emailService.send).mockResolvedValue({ success: true });
-      vi.mocked(prisma.purchase.update).mockResolvedValue(mockPurchase);
-      vi.mocked(prisma.delivery.create).mockResolvedValue({ id: 'delivery-1' });
+      await fulfillListPurchase('purchase-123');
 
-      await purchaseFulfillment.fulfill('purchase-123');
-
-      expect(dataProvider.query).toHaveBeenCalledWith(
+      expect(mockFetch).toHaveBeenCalledWith(
+        'https://api.customer.com/data-webhook',
         expect.objectContaining({
-          database: 'nho',
-          geography: expect.objectContaining({
-            type: 'state',
-            values: ['CA', 'NV'],
-          }),
-          filters: expect.objectContaining({
-            sale_price_min: 300000,
-          }),
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: expect.any(String),
         })
       );
     });
 
-    it('applies email append when requested', async () => {
+    it('webhook payload includes purchase details', async () => {
       const mockPurchase = createMockPurchase({
-        appendEmail: true,
+        deliveryMethod: 'webhook',
+        deliveryConfig: {
+          webhook_url: 'https://webhook.example.com',
+        },
       });
+      vi.mocked(prisma.listPurchase.findUnique).mockResolvedValue(mockPurchase as any);
+      vi.mocked(prisma.listPurchase.update).mockResolvedValue(mockPurchase as any);
+      vi.mocked(prisma.exportFile.create).mockResolvedValue({ id: 'export-123' } as any);
+      vi.mocked(exportGenerator.generateLocalExport).mockResolvedValue({
+        buffer: Buffer.from('csv data'),
+        contentType: 'text/csv',
+        filename: 'test.csv',
+      });
+      mockFetch.mockResolvedValue({ ok: true });
 
-      vi.mocked(prisma.purchase.findUnique).mockResolvedValue(mockPurchase);
-      vi.mocked(dataProvider.query).mockResolvedValue(createMockRecords(100));
-      vi.mocked(exportGenerator.toCSV).mockResolvedValue(Buffer.from('csv'));
-      vi.mocked(exportGenerator.uploadToS3).mockResolvedValue('s3://bucket/file.csv');
-      vi.mocked(exportGenerator.generateSignedUrl).mockResolvedValue('https://url');
-      vi.mocked(emailService.send).mockResolvedValue({ success: true });
-      vi.mocked(prisma.purchase.update).mockResolvedValue(mockPurchase);
-      vi.mocked(prisma.delivery.create).mockResolvedValue({ id: 'delivery-1' });
+      await fulfillListPurchase('purchase-123');
 
-      await purchaseFulfillment.fulfill('purchase-123');
-
-      expect(dataProvider.query).toHaveBeenCalledWith(
+      const fetchCall = mockFetch.mock.calls[0];
+      const body = JSON.parse(fetchCall[1].body);
+      expect(body).toEqual(
         expect.objectContaining({
-          appendEmail: true,
+          purchase_id: 'purchase-123',
+          record_count: 100,
+          format: 'csv',
         })
       );
     });
 
-    it('applies phone append when requested', async () => {
+    it('throws error when webhook delivery fails', async () => {
       const mockPurchase = createMockPurchase({
-        appendPhone: true,
+        deliveryMethod: 'webhook',
+        deliveryConfig: {
+          webhook_url: 'https://api.customer.com/data-webhook',
+        },
+      });
+      vi.mocked(prisma.listPurchase.findUnique).mockResolvedValue(mockPurchase as any);
+      vi.mocked(prisma.listPurchase.update).mockResolvedValue(mockPurchase as any);
+      vi.mocked(prisma.exportFile.create).mockResolvedValue({ id: 'export-123' } as any);
+      vi.mocked(exportGenerator.generateLocalExport).mockResolvedValue({
+        buffer: Buffer.from('csv data'),
+        contentType: 'text/csv',
+        filename: 'test.csv',
+      });
+      mockFetch.mockResolvedValue({ ok: false, status: 500 });
+
+      await expect(fulfillListPurchase('purchase-123')).rejects.toThrow('Webhook delivery failed');
+    });
+
+    it('logs SFTP delivery as not yet implemented', async () => {
+      const consoleSpy = vi.spyOn(console, 'log');
+      const mockPurchase = createMockPurchase({
+        deliveryMethod: 'sftp',
+        deliveryConfig: {
+          sftp_config_id: 'sftp-config-123',
+        },
+      });
+      vi.mocked(prisma.listPurchase.findUnique).mockResolvedValue(mockPurchase as any);
+      vi.mocked(prisma.listPurchase.update).mockResolvedValue(mockPurchase as any);
+      vi.mocked(prisma.exportFile.create).mockResolvedValue({ id: 'export-123' } as any);
+      vi.mocked(exportGenerator.generateLocalExport).mockResolvedValue({
+        buffer: Buffer.from('csv data'),
+        contentType: 'text/csv',
+        filename: 'test.csv',
       });
 
-      vi.mocked(prisma.purchase.findUnique).mockResolvedValue(mockPurchase);
-      vi.mocked(dataProvider.query).mockResolvedValue(createMockRecords(100));
-      vi.mocked(exportGenerator.toCSV).mockResolvedValue(Buffer.from('csv'));
-      vi.mocked(exportGenerator.uploadToS3).mockResolvedValue('s3://bucket/file.csv');
-      vi.mocked(exportGenerator.generateSignedUrl).mockResolvedValue('https://url');
-      vi.mocked(emailService.send).mockResolvedValue({ success: true });
-      vi.mocked(prisma.purchase.update).mockResolvedValue(mockPurchase);
-      vi.mocked(prisma.delivery.create).mockResolvedValue({ id: 'delivery-1' });
+      await fulfillListPurchase('purchase-123');
 
-      await purchaseFulfillment.fulfill('purchase-123');
-
-      expect(dataProvider.query).toHaveBeenCalledWith(
-        expect.objectContaining({
-          appendPhone: true,
-        })
+      expect(consoleSpy).toHaveBeenCalledWith(
+        expect.stringContaining('SFTP delivery not yet implemented')
       );
     });
   });
 
-  describe('generates export file', () => {
+  describe('export formats', () => {
     it('generates CSV export', async () => {
-      const mockPurchase = createMockPurchase({
-        exportFormat: 'csv',
+      const mockPurchase = createMockPurchase({ exportFormat: 'csv' });
+      vi.mocked(prisma.listPurchase.findUnique).mockResolvedValue(mockPurchase as any);
+      vi.mocked(prisma.listPurchase.update).mockResolvedValue(mockPurchase as any);
+      vi.mocked(prisma.exportFile.create).mockResolvedValue({ id: 'export-123' } as any);
+      vi.mocked(exportGenerator.generateLocalExport).mockResolvedValue({
+        buffer: Buffer.from('csv data'),
+        contentType: 'text/csv',
+        filename: 'test.csv',
       });
-      const mockRecords = createMockRecords(500);
 
-      vi.mocked(prisma.purchase.findUnique).mockResolvedValue(mockPurchase);
-      vi.mocked(dataProvider.query).mockResolvedValue(mockRecords);
-      vi.mocked(exportGenerator.toCSV).mockResolvedValue(Buffer.from('csv data'));
-      vi.mocked(exportGenerator.uploadToS3).mockResolvedValue('s3://bucket/file.csv');
-      vi.mocked(exportGenerator.generateSignedUrl).mockResolvedValue('https://url');
-      vi.mocked(emailService.send).mockResolvedValue({ success: true });
-      vi.mocked(prisma.purchase.update).mockResolvedValue(mockPurchase);
-      vi.mocked(prisma.delivery.create).mockResolvedValue({ id: 'delivery-1' });
+      await fulfillListPurchase('purchase-123');
 
-      await purchaseFulfillment.fulfill('purchase-123');
-
-      expect(exportGenerator.toCSV).toHaveBeenCalledWith(
-        mockRecords,
-        expect.any(Object)
+      expect(exportGenerator.generateLocalExport).toHaveBeenCalledWith(
+        expect.objectContaining({ format: 'csv' })
       );
     });
 
     it('generates Excel export', async () => {
-      const mockPurchase = createMockPurchase({
-        exportFormat: 'xlsx',
+      const mockPurchase = createMockPurchase({ exportFormat: 'excel' });
+      vi.mocked(prisma.listPurchase.findUnique).mockResolvedValue(mockPurchase as any);
+      vi.mocked(prisma.listPurchase.update).mockResolvedValue(mockPurchase as any);
+      vi.mocked(prisma.exportFile.create).mockResolvedValue({ id: 'export-123' } as any);
+      vi.mocked(exportGenerator.generateLocalExport).mockResolvedValue({
+        buffer: Buffer.from('xlsx data'),
+        contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        filename: 'test.xlsx',
       });
-      const mockRecords = createMockRecords(500);
 
-      vi.mocked(prisma.purchase.findUnique).mockResolvedValue(mockPurchase);
-      vi.mocked(dataProvider.query).mockResolvedValue(mockRecords);
-      vi.mocked(exportGenerator.toExcel).mockResolvedValue(Buffer.from('xlsx data'));
-      vi.mocked(exportGenerator.uploadToS3).mockResolvedValue('s3://bucket/file.xlsx');
-      vi.mocked(exportGenerator.generateSignedUrl).mockResolvedValue('https://url');
-      vi.mocked(emailService.send).mockResolvedValue({ success: true });
-      vi.mocked(prisma.purchase.update).mockResolvedValue(mockPurchase);
-      vi.mocked(prisma.delivery.create).mockResolvedValue({ id: 'delivery-1' });
+      await fulfillListPurchase('purchase-123');
 
-      await purchaseFulfillment.fulfill('purchase-123');
-
-      expect(exportGenerator.toExcel).toHaveBeenCalled();
+      expect(exportGenerator.generateLocalExport).toHaveBeenCalledWith(
+        expect.objectContaining({ format: 'excel' })
+      );
     });
 
     it('generates JSON export', async () => {
-      const mockPurchase = createMockPurchase({
-        exportFormat: 'json',
+      const mockPurchase = createMockPurchase({ exportFormat: 'json' });
+      vi.mocked(prisma.listPurchase.findUnique).mockResolvedValue(mockPurchase as any);
+      vi.mocked(prisma.listPurchase.update).mockResolvedValue(mockPurchase as any);
+      vi.mocked(prisma.exportFile.create).mockResolvedValue({ id: 'export-123' } as any);
+      vi.mocked(exportGenerator.generateLocalExport).mockResolvedValue({
+        buffer: Buffer.from('{}'),
+        contentType: 'application/json',
+        filename: 'test.json',
       });
-      const mockRecords = createMockRecords(500);
 
-      vi.mocked(prisma.purchase.findUnique).mockResolvedValue(mockPurchase);
-      vi.mocked(dataProvider.query).mockResolvedValue(mockRecords);
-      vi.mocked(exportGenerator.toJSON).mockResolvedValue(Buffer.from('{}'));
-      vi.mocked(exportGenerator.uploadToS3).mockResolvedValue('s3://bucket/file.json');
-      vi.mocked(exportGenerator.generateSignedUrl).mockResolvedValue('https://url');
-      vi.mocked(emailService.send).mockResolvedValue({ success: true });
-      vi.mocked(prisma.purchase.update).mockResolvedValue(mockPurchase);
-      vi.mocked(prisma.delivery.create).mockResolvedValue({ id: 'delivery-1' });
+      await fulfillListPurchase('purchase-123');
 
-      await purchaseFulfillment.fulfill('purchase-123');
-
-      expect(exportGenerator.toJSON).toHaveBeenCalled();
-    });
-
-    it('uploads export to S3', async () => {
-      const mockPurchase = createMockPurchase();
-      vi.mocked(prisma.purchase.findUnique).mockResolvedValue(mockPurchase);
-      vi.mocked(dataProvider.query).mockResolvedValue(createMockRecords(100));
-      vi.mocked(exportGenerator.toCSV).mockResolvedValue(Buffer.from('csv data'));
-      vi.mocked(exportGenerator.uploadToS3).mockResolvedValue('s3://bucket/exports/purchase-123.csv');
-      vi.mocked(exportGenerator.generateSignedUrl).mockResolvedValue('https://url');
-      vi.mocked(emailService.send).mockResolvedValue({ success: true });
-      vi.mocked(prisma.purchase.update).mockResolvedValue(mockPurchase);
-      vi.mocked(prisma.delivery.create).mockResolvedValue({ id: 'delivery-1' });
-
-      await purchaseFulfillment.fulfill('purchase-123');
-
-      expect(exportGenerator.uploadToS3).toHaveBeenCalledWith(
-        expect.any(Buffer),
-        expect.stringContaining('purchase-123'),
-        expect.any(Object)
+      expect(exportGenerator.generateLocalExport).toHaveBeenCalledWith(
+        expect.objectContaining({ format: 'json' })
       );
     });
   });
 
-  describe('delivers via email', () => {
-    it('sends email with download link', async () => {
+  describe('data generation', () => {
+    it('generates correct number of records based on purchase', async () => {
+      const mockPurchase = createMockPurchase({ recordCount: 500 });
+      vi.mocked(prisma.listPurchase.findUnique).mockResolvedValue(mockPurchase as any);
+      vi.mocked(prisma.listPurchase.update).mockResolvedValue(mockPurchase as any);
+      vi.mocked(prisma.exportFile.create).mockResolvedValue({ id: 'export-123' } as any);
+      vi.mocked(exportGenerator.generateLocalExport).mockResolvedValue({
+        buffer: Buffer.from('csv data'),
+        contentType: 'text/csv',
+        filename: 'test.csv',
+      });
+
+      await fulfillListPurchase('purchase-123');
+
+      expect(exportGenerator.generateLocalExport).toHaveBeenCalledWith(
+        expect.objectContaining({
+          records: expect.arrayContaining([
+            expect.objectContaining({
+              first_name: expect.any(String),
+              last_name: expect.any(String),
+              address: expect.any(String),
+              city: expect.any(String),
+              state: 'AZ',
+              zip: expect.any(String),
+            }),
+          ]),
+        })
+      );
+
+      // Verify record count
+      const callArgs = vi.mocked(exportGenerator.generateLocalExport).mock.calls[0][0];
+      expect(callArgs.records).toHaveLength(500);
+    });
+
+    it('includes email when withEmail > 0', async () => {
       const mockPurchase = createMockPurchase({
-        deliveryMethod: 'email',
-        deliveryConfig: {
-          email: 'customer@example.com',
-        },
+        recordCount: 10,
+        withEmail: 5,
+      });
+      vi.mocked(prisma.listPurchase.findUnique).mockResolvedValue(mockPurchase as any);
+      vi.mocked(prisma.listPurchase.update).mockResolvedValue(mockPurchase as any);
+      vi.mocked(prisma.exportFile.create).mockResolvedValue({ id: 'export-123' } as any);
+      vi.mocked(exportGenerator.generateLocalExport).mockResolvedValue({
+        buffer: Buffer.from('csv data'),
+        contentType: 'text/csv',
+        filename: 'test.csv',
       });
 
-      vi.mocked(prisma.purchase.findUnique).mockResolvedValue(mockPurchase);
-      vi.mocked(dataProvider.query).mockResolvedValue(createMockRecords(100));
-      vi.mocked(exportGenerator.toCSV).mockResolvedValue(Buffer.from('csv'));
-      vi.mocked(exportGenerator.uploadToS3).mockResolvedValue('s3://bucket/file.csv');
-      vi.mocked(exportGenerator.generateSignedUrl).mockResolvedValue('https://download.example.com/file.csv');
-      vi.mocked(emailService.send).mockResolvedValue({ success: true, messageId: 'msg-123' });
-      vi.mocked(prisma.purchase.update).mockResolvedValue(mockPurchase);
-      vi.mocked(prisma.delivery.create).mockResolvedValue({ id: 'delivery-1' });
+      await fulfillListPurchase('purchase-123');
 
-      await purchaseFulfillment.fulfill('purchase-123');
-
-      expect(emailService.send).toHaveBeenCalledWith(
-        expect.objectContaining({
-          to: 'customer@example.com',
-          subject: expect.stringContaining('Data'),
-          html: expect.stringContaining('https://download.example.com'),
-        })
-      );
+      const callArgs = vi.mocked(exportGenerator.generateLocalExport).mock.calls[0][0];
+      const recordsWithEmail = callArgs.records.filter((r: Record<string, unknown>) => r.email);
+      expect(recordsWithEmail.length).toBe(5);
     });
 
-    it('includes purchase details in email', async () => {
+    it('includes phone when withPhone > 0', async () => {
       const mockPurchase = createMockPurchase({
-        recordCount: 5000,
-        query: { database: 'nho' },
-        deliveryMethod: 'email',
-        deliveryConfig: { email: 'customer@example.com' },
+        recordCount: 10,
+        withPhone: 3,
+      });
+      vi.mocked(prisma.listPurchase.findUnique).mockResolvedValue(mockPurchase as any);
+      vi.mocked(prisma.listPurchase.update).mockResolvedValue(mockPurchase as any);
+      vi.mocked(prisma.exportFile.create).mockResolvedValue({ id: 'export-123' } as any);
+      vi.mocked(exportGenerator.generateLocalExport).mockResolvedValue({
+        buffer: Buffer.from('csv data'),
+        contentType: 'text/csv',
+        filename: 'test.csv',
       });
 
-      vi.mocked(prisma.purchase.findUnique).mockResolvedValue(mockPurchase);
-      vi.mocked(dataProvider.query).mockResolvedValue(createMockRecords(100));
-      vi.mocked(exportGenerator.toCSV).mockResolvedValue(Buffer.from('csv'));
-      vi.mocked(exportGenerator.uploadToS3).mockResolvedValue('s3://bucket/file.csv');
-      vi.mocked(exportGenerator.generateSignedUrl).mockResolvedValue('https://download.url');
-      vi.mocked(emailService.send).mockResolvedValue({ success: true });
-      vi.mocked(prisma.purchase.update).mockResolvedValue(mockPurchase);
-      vi.mocked(prisma.delivery.create).mockResolvedValue({ id: 'delivery-1' });
+      await fulfillListPurchase('purchase-123');
 
-      await purchaseFulfillment.fulfill('purchase-123');
-
-      expect(emailService.send).toHaveBeenCalledWith(
-        expect.objectContaining({
-          html: expect.stringMatching(/5[,]?000/),
-        })
-      );
+      const callArgs = vi.mocked(exportGenerator.generateLocalExport).mock.calls[0][0];
+      const recordsWithPhone = callArgs.records.filter((r: Record<string, unknown>) => r.phone);
+      expect(recordsWithPhone.length).toBe(3);
     });
-  });
 
-  describe('delivers via webhook', () => {
-    it('sends data to webhook URL', async () => {
-      const mockPurchase = createMockPurchase({
-        deliveryMethod: 'webhook',
-        deliveryConfig: {
-          url: 'https://api.customer.com/data-webhook',
-          headers: { 'X-API-Key': 'secret123' },
-        },
+    it('includes move_date for NHO database', async () => {
+      const mockPurchase = createMockPurchase({ database: 'nho' });
+      vi.mocked(prisma.listPurchase.findUnique).mockResolvedValue(mockPurchase as any);
+      vi.mocked(prisma.listPurchase.update).mockResolvedValue(mockPurchase as any);
+      vi.mocked(prisma.exportFile.create).mockResolvedValue({ id: 'export-123' } as any);
+      vi.mocked(exportGenerator.generateLocalExport).mockResolvedValue({
+        buffer: Buffer.from('csv data'),
+        contentType: 'text/csv',
+        filename: 'test.csv',
       });
 
-      vi.mocked(prisma.purchase.findUnique).mockResolvedValue(mockPurchase);
-      vi.mocked(dataProvider.query).mockResolvedValue(createMockRecords(100));
-      vi.mocked(exportGenerator.toCSV).mockResolvedValue(Buffer.from('csv'));
-      vi.mocked(exportGenerator.uploadToS3).mockResolvedValue('s3://bucket/file.csv');
-      vi.mocked(exportGenerator.generateSignedUrl).mockResolvedValue('https://download.url');
-      vi.mocked(webhookService.send).mockResolvedValue({ success: true });
-      vi.mocked(prisma.purchase.update).mockResolvedValue(mockPurchase);
-      vi.mocked(prisma.delivery.create).mockResolvedValue({ id: 'delivery-1' });
+      await fulfillListPurchase('purchase-123');
 
-      await purchaseFulfillment.fulfill('purchase-123');
-
-      expect(webhookService.send).toHaveBeenCalledWith(
-        'https://api.customer.com/data-webhook',
-        expect.objectContaining({
-          purchaseId: 'purchase-123',
-          downloadUrl: 'https://download.url',
-        }),
-        expect.objectContaining({
-          headers: expect.objectContaining({
-            'X-API-Key': 'secret123',
-          }),
-        })
-      );
+      const callArgs = vi.mocked(exportGenerator.generateLocalExport).mock.calls[0][0];
+      expect(callArgs.records[0]).toHaveProperty('move_date');
     });
 
-    it('includes metadata in webhook payload', async () => {
-      const mockPurchase = createMockPurchase({
-        deliveryMethod: 'webhook',
-        deliveryConfig: {
-          url: 'https://webhook.example.com',
-        },
-        recordCount: 2500,
+    it('includes company fields for business database', async () => {
+      const mockPurchase = createMockPurchase({ database: 'business' });
+      vi.mocked(prisma.listPurchase.findUnique).mockResolvedValue(mockPurchase as any);
+      vi.mocked(prisma.listPurchase.update).mockResolvedValue(mockPurchase as any);
+      vi.mocked(prisma.exportFile.create).mockResolvedValue({ id: 'export-123' } as any);
+      vi.mocked(exportGenerator.generateLocalExport).mockResolvedValue({
+        buffer: Buffer.from('csv data'),
+        contentType: 'text/csv',
+        filename: 'test.csv',
       });
 
-      vi.mocked(prisma.purchase.findUnique).mockResolvedValue(mockPurchase);
-      vi.mocked(dataProvider.query).mockResolvedValue(createMockRecords(100));
-      vi.mocked(exportGenerator.toCSV).mockResolvedValue(Buffer.from('csv'));
-      vi.mocked(exportGenerator.uploadToS3).mockResolvedValue('s3://bucket/file.csv');
-      vi.mocked(exportGenerator.generateSignedUrl).mockResolvedValue('https://download.url');
-      vi.mocked(webhookService.send).mockResolvedValue({ success: true });
-      vi.mocked(prisma.purchase.update).mockResolvedValue(mockPurchase);
-      vi.mocked(prisma.delivery.create).mockResolvedValue({ id: 'delivery-1' });
+      await fulfillListPurchase('purchase-123');
 
-      await purchaseFulfillment.fulfill('purchase-123');
-
-      expect(webhookService.send).toHaveBeenCalledWith(
-        expect.any(String),
-        expect.objectContaining({
-          recordCount: 2500,
-          format: 'csv',
-        }),
-        expect.any(Object)
-      );
-    });
-  });
-
-  describe('delivers via SFTP', () => {
-    it('uploads file to SFTP server', async () => {
-      const mockPurchase = createMockPurchase({
-        deliveryMethod: 'sftp',
-        deliveryConfig: {
-          host: 'sftp.customer.com',
-          port: 22,
-          username: 'customer',
-          password: 'encrypted-password',
-          remotePath: '/uploads/data/',
-        },
-      });
-
-      vi.mocked(prisma.purchase.findUnique).mockResolvedValue(mockPurchase);
-      vi.mocked(dataProvider.query).mockResolvedValue(createMockRecords(100));
-      vi.mocked(exportGenerator.toCSV).mockResolvedValue(Buffer.from('csv'));
-      vi.mocked(exportGenerator.uploadToS3).mockResolvedValue('s3://bucket/file.csv');
-      vi.mocked(sftpService.connect).mockResolvedValue(undefined);
-      vi.mocked(sftpService.upload).mockResolvedValue({ success: true });
-      vi.mocked(sftpService.disconnect).mockResolvedValue(undefined);
-      vi.mocked(prisma.purchase.update).mockResolvedValue(mockPurchase);
-      vi.mocked(prisma.delivery.create).mockResolvedValue({ id: 'delivery-1' });
-
-      await purchaseFulfillment.fulfill('purchase-123');
-
-      expect(sftpService.upload).toHaveBeenCalledWith(
-        expect.any(Buffer),
-        expect.stringContaining('/uploads/data/'),
-        expect.any(Object)
-      );
-    });
-
-    it('uses correct filename for SFTP upload', async () => {
-      const mockPurchase = createMockPurchase({
-        deliveryMethod: 'sftp',
-        deliveryConfig: {
-          host: 'sftp.example.com',
-          remotePath: '/data/',
-          filenamePattern: 'nho-data-{date}.csv',
-        },
-      });
-
-      vi.mocked(prisma.purchase.findUnique).mockResolvedValue(mockPurchase);
-      vi.mocked(dataProvider.query).mockResolvedValue(createMockRecords(100));
-      vi.mocked(exportGenerator.toCSV).mockResolvedValue(Buffer.from('csv'));
-      vi.mocked(exportGenerator.uploadToS3).mockResolvedValue('s3://bucket/file.csv');
-      vi.mocked(sftpService.connect).mockResolvedValue(undefined);
-      vi.mocked(sftpService.upload).mockResolvedValue({ success: true });
-      vi.mocked(sftpService.disconnect).mockResolvedValue(undefined);
-      vi.mocked(prisma.purchase.update).mockResolvedValue(mockPurchase);
-      vi.mocked(prisma.delivery.create).mockResolvedValue({ id: 'delivery-1' });
-
-      await purchaseFulfillment.fulfill('purchase-123');
-
-      expect(sftpService.upload).toHaveBeenCalledWith(
-        expect.any(Buffer),
-        expect.stringMatching(/nho-data-\d{4}-\d{2}-\d{2}\.csv/),
-        expect.any(Object)
-      );
-    });
-  });
-
-  describe('error handling', () => {
-    it('marks purchase as failed on data query error', async () => {
-      const mockPurchase = createMockPurchase();
-      vi.mocked(prisma.purchase.findUnique).mockResolvedValue(mockPurchase);
-      vi.mocked(dataProvider.query).mockRejectedValue(new Error('Data provider error'));
-      vi.mocked(prisma.purchase.update).mockResolvedValue({
-        ...mockPurchase,
-        status: 'failed',
-      });
-
-      await expect(
-        purchaseFulfillment.fulfill('purchase-123')
-      ).rejects.toThrow();
-
-      expect(prisma.purchase.update).toHaveBeenCalledWith(
-        expect.objectContaining({
-          data: expect.objectContaining({
-            status: 'failed',
-            error: expect.stringContaining('Data provider'),
-          }),
-        })
-      );
-    });
-
-    it('marks purchase as failed on delivery error', async () => {
-      const mockPurchase = createMockPurchase();
-      vi.mocked(prisma.purchase.findUnique).mockResolvedValue(mockPurchase);
-      vi.mocked(dataProvider.query).mockResolvedValue(createMockRecords(100));
-      vi.mocked(exportGenerator.toCSV).mockResolvedValue(Buffer.from('csv'));
-      vi.mocked(exportGenerator.uploadToS3).mockResolvedValue('s3://bucket/file.csv');
-      vi.mocked(exportGenerator.generateSignedUrl).mockResolvedValue('https://url');
-      vi.mocked(emailService.send).mockRejectedValue(new Error('Email delivery failed'));
-      vi.mocked(prisma.purchase.update).mockResolvedValue({
-        ...mockPurchase,
-        status: 'failed',
-      });
-
-      await expect(
-        purchaseFulfillment.fulfill('purchase-123')
-      ).rejects.toThrow();
-
-      expect(prisma.purchase.update).toHaveBeenCalledWith(
-        expect.objectContaining({
-          data: expect.objectContaining({
-            status: 'failed',
-          }),
-        })
-      );
-    });
-
-    it('retries on transient failures', async () => {
-      const mockPurchase = createMockPurchase();
-      vi.mocked(prisma.purchase.findUnique).mockResolvedValue(mockPurchase);
-      vi.mocked(dataProvider.query).mockResolvedValue(createMockRecords(100));
-      vi.mocked(exportGenerator.toCSV).mockResolvedValue(Buffer.from('csv'));
-      vi.mocked(exportGenerator.uploadToS3).mockResolvedValue('s3://bucket/file.csv');
-      vi.mocked(exportGenerator.generateSignedUrl).mockResolvedValue('https://url');
-      vi.mocked(emailService.send)
-        .mockRejectedValueOnce(new Error('Temporary failure'))
-        .mockResolvedValueOnce({ success: true });
-      vi.mocked(prisma.purchase.update).mockResolvedValue(mockPurchase);
-      vi.mocked(prisma.delivery.create).mockResolvedValue({ id: 'delivery-1' });
-
-      await purchaseFulfillment.fulfill('purchase-123', { retries: 2 });
-
-      expect(emailService.send).toHaveBeenCalledTimes(2);
-    });
-  });
-
-  describe('completion tracking', () => {
-    it('marks purchase as completed on success', async () => {
-      const mockPurchase = createMockPurchase();
-      vi.mocked(prisma.purchase.findUnique).mockResolvedValue(mockPurchase);
-      vi.mocked(dataProvider.query).mockResolvedValue(createMockRecords(100));
-      vi.mocked(exportGenerator.toCSV).mockResolvedValue(Buffer.from('csv'));
-      vi.mocked(exportGenerator.uploadToS3).mockResolvedValue('s3://bucket/file.csv');
-      vi.mocked(exportGenerator.generateSignedUrl).mockResolvedValue('https://url');
-      vi.mocked(emailService.send).mockResolvedValue({ success: true });
-      vi.mocked(prisma.purchase.update).mockResolvedValue({
-        ...mockPurchase,
-        status: 'completed',
-      });
-      vi.mocked(prisma.delivery.create).mockResolvedValue({ id: 'delivery-1' });
-
-      await purchaseFulfillment.fulfill('purchase-123');
-
-      expect(prisma.purchase.update).toHaveBeenCalledWith(
-        expect.objectContaining({
-          data: expect.objectContaining({
-            status: 'completed',
-            completedAt: expect.any(Date),
-          }),
-        })
-      );
-    });
-
-    it('creates delivery record', async () => {
-      const mockPurchase = createMockPurchase();
-      vi.mocked(prisma.purchase.findUnique).mockResolvedValue(mockPurchase);
-      vi.mocked(dataProvider.query).mockResolvedValue(createMockRecords(100));
-      vi.mocked(exportGenerator.toCSV).mockResolvedValue(Buffer.from('csv'));
-      vi.mocked(exportGenerator.uploadToS3).mockResolvedValue('s3://bucket/file.csv');
-      vi.mocked(exportGenerator.generateSignedUrl).mockResolvedValue('https://url');
-      vi.mocked(emailService.send).mockResolvedValue({ success: true });
-      vi.mocked(prisma.purchase.update).mockResolvedValue(mockPurchase);
-      vi.mocked(prisma.delivery.create).mockResolvedValue({
-        id: 'delivery-123',
-        purchaseId: 'purchase-123',
-        recordCount: 100,
-      });
-
-      await purchaseFulfillment.fulfill('purchase-123');
-
-      expect(prisma.delivery.create).toHaveBeenCalledWith(
-        expect.objectContaining({
-          data: expect.objectContaining({
-            purchaseId: 'purchase-123',
-            recordCount: 100,
-            deliveryMethod: 'email',
-          }),
-        })
-      );
+      const callArgs = vi.mocked(exportGenerator.generateLocalExport).mock.calls[0][0];
+      expect(callArgs.records[0]).toHaveProperty('company_name');
+      expect(callArgs.records[0]).toHaveProperty('title');
     });
   });
 });

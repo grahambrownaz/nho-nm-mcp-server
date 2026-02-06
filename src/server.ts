@@ -105,6 +105,40 @@ import {
   executeConfigureIntentWebhook,
 } from './tools/intent/index.js';
 
+// Email tools (ReachMail integration)
+import {
+  configureEmailAccountTool,
+  executeConfigureEmailAccount,
+  createEmailListTool,
+  executeCreateEmailList,
+  createEmailCampaignTool,
+  executeCreateEmailCampaign,
+  sendEmailCampaignTool,
+  executeSendEmailCampaign,
+  getEmailAnalyticsTool,
+  executeGetEmailAnalytics,
+  listEmailCampaignsTool,
+  executeListEmailCampaigns,
+} from './tools/email/index.js';
+
+// Discovery tools (onboarding)
+import {
+  getRecommendationsTool,
+  executeGetRecommendations,
+} from './tools/discovery/index.js';
+
+// SWOTSPOT tools (local business audit)
+import {
+  configureSwotspotTool,
+  executeConfigureSwotspot,
+  runLocalAuditTool,
+  executeRunLocalAudit,
+  listAuditsTool,
+  executeListAudits,
+  trackCompetitorTool,
+  executeTrackCompetitor,
+} from './tools/swotspot/index.js';
+
 // Scheduler (Week 3 - updated)
 import { startScheduler, stopScheduler } from './cron/scheduler.js';
 
@@ -156,6 +190,20 @@ const TOOLS = [
   createIntentSubscriptionTool,
   listIntentCategoriesTool,
   configureIntentWebhookTool,
+  // Email tools (ReachMail integration)
+  configureEmailAccountTool,
+  createEmailListTool,
+  createEmailCampaignTool,
+  sendEmailCampaignTool,
+  getEmailAnalyticsTool,
+  listEmailCampaignsTool,
+  // Discovery tools (onboarding)
+  getRecommendationsTool,
+  // SWOTSPOT tools (local business audit)
+  configureSwotspotTool,
+  runLocalAuditTool,
+  listAuditsTool,
+  trackCompetitorTool,
 ];
 
 /**
@@ -200,6 +248,20 @@ const TOOL_EXECUTORS: Record<
   create_intent_subscription: executeCreateIntentSubscription,
   list_intent_categories: executeListIntentCategories,
   configure_intent_webhook: executeConfigureIntentWebhook,
+  // Email tools (ReachMail integration)
+  configure_email_account: executeConfigureEmailAccount,
+  create_email_list: executeCreateEmailList,
+  create_email_campaign: executeCreateEmailCampaign,
+  send_email_campaign: executeSendEmailCampaign,
+  get_email_analytics: executeGetEmailAnalytics,
+  list_email_campaigns: executeListEmailCampaigns,
+  // Discovery tools (onboarding)
+  get_recommendations: executeGetRecommendations,
+  // SWOTSPOT tools (local business audit)
+  configure_swotspot: executeConfigureSwotspot,
+  run_local_audit: executeRunLocalAudit,
+  list_audits: executeListAudits,
+  track_competitor: executeTrackCompetitor,
 };
 
 /**

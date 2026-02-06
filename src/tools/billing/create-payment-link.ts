@@ -151,6 +151,30 @@ export async function executeCreatePaymentLink(
     metadata,
   } = validatedInput;
 
+  // Business validation - check required fields based on product_type
+  if (product_type === 'list_purchase' && !quote_id) {
+    throw new Error('quote_id is required for list_purchase type');
+  }
+  if (product_type === 'postcard_batch' && (!postcard_count || !postcard_size)) {
+    throw new Error('postcard_count and postcard_size are required for postcard_batch type');
+  }
+  if (product_type === 'custom' && (!customLineItems || customLineItems.length === 0)) {
+    throw new Error('line_items are required for custom type');
+  }
+
+  // Demo mode: return mock payment link
+  if (process.env.DEMO_MODE === 'true') {
+    const expiresAt = new Date(Date.now() + (expires_in_hours || 24) * 60 * 60 * 1000);
+    return {
+      payment_link_id: `plink_demo_${Date.now()}`,
+      url: `https://pay.stripe.com/demo/${product_type}`,
+      expires_at: expiresAt.toISOString(),
+      amount: 99.00,
+      currency: 'usd',
+      line_items: [{ description: `Demo ${product_type} purchase`, quantity: 1, unit_price: 99.00, total: 99.00 }],
+    };
+  }
+
   // Initialize Stripe
   const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '', {
     apiVersion: '2026-01-28.clover',
@@ -174,10 +198,6 @@ export async function executeCreatePaymentLink(
   }> = [];
 
   if (product_type === 'list_purchase') {
-    if (!quote_id) {
-      throw new Error('quote_id is required for list_purchase type');
-    }
-
     // Get the purchase record
     const purchase = await prisma.listPurchase.findFirst({
       where: {
@@ -221,12 +241,8 @@ export async function executeCreatePaymentLink(
       total: totalAmount,
     });
   } else if (product_type === 'postcard_batch') {
-    if (!postcard_count || !postcard_size) {
-      throw new Error('postcard_count and postcard_size are required for postcard_batch type');
-    }
-
-    const unitPrice = POSTCARD_PRICING[postcard_size];
-    totalAmount = postcard_count * unitPrice;
+    const unitPrice = POSTCARD_PRICING[postcard_size!];
+    totalAmount = postcard_count! * unitPrice;
 
     const price = await stripe.prices.create({
       currency: 'usd',
@@ -236,9 +252,9 @@ export async function executeCreatePaymentLink(
       },
     });
 
-    stripeLineItems = [{ price: price.id, quantity: postcard_count }];
-    productMetadata.postcard_size = postcard_size;
-    productMetadata.postcard_count = postcard_count.toString();
+    stripeLineItems = [{ price: price.id, quantity: postcard_count! }];
+    productMetadata.postcard_size = postcard_size!;
+    productMetadata.postcard_count = postcard_count!.toString();
 
     lineItemsResponse.push({
       description: `${postcard_size} Postcards`,
@@ -247,11 +263,7 @@ export async function executeCreatePaymentLink(
       total: totalAmount,
     });
   } else if (product_type === 'custom') {
-    if (!customLineItems || customLineItems.length === 0) {
-      throw new Error('line_items are required for custom type');
-    }
-
-    for (const item of customLineItems) {
+    for (const item of customLineItems!) {
       const price = await stripe.prices.create({
         currency: 'usd',
         unit_amount: Math.round(item.unit_price * 100),

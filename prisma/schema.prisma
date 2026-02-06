@@ -44,6 +44,11 @@ model Tenant {
   listPurchases     ListPurchase[]
   intentSubscriptions IntentSubscription[]
   intentWebhooks    IntentWebhook[]
+  emailConfig       EmailConfig?
+  emailCampaigns    EmailCampaign[]
+  swotspotConfig      SwotspotConfig?
+  swotspotAudits      SwotspotAudit[]
+  swotspotCompetitors SwotspotCompetitor[]
 
   @@index([parentTenantId])
   @@map("tenants")
@@ -183,8 +188,9 @@ enum UsageType {
   PHONE_APPEND
   PDF_GENERATION
   PRINT_FULFILLMENT
-  SAMPLE_DATA      // Usually free
-  PREVIEW_COUNT    // Usually free
+  EMAIL_SEND        // ReachMail email sends
+  SAMPLE_DATA       // Usually free
+  PREVIEW_COUNT     // Usually free
 }
 
 // ============================================================================
@@ -450,6 +456,7 @@ enum TemplateCategory {
   RETAIL
   GENERAL
   CUSTOM
+  EMAIL       // Email templates
 }
 
 enum PostcardSize {
@@ -879,4 +886,171 @@ enum IntentDeliveryStatus {
   DELIVERED
   FAILED
   RETRYING
+}
+
+// ============================================================================
+// EMAIL CAMPAIGNS (ReachMail Integration)
+// ============================================================================
+
+model EmailConfig {
+  id                  String   @id @default(uuid())
+  tenantId            String   @unique
+  tenant              Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  // ReachMail credentials (encrypted)
+  reachmailToken      String   @db.Text  // Encrypted with AES-256-GCM
+  reachmailAccountId  String?            // Retrieved from API on setup
+
+  // Default sending settings
+  defaultFromAddress  String
+  defaultReplyTo      String?
+  physicalAddress     String             // CAN-SPAM required
+
+  // Domain authentication
+  dkimDomain          String?
+  isVerified          Boolean  @default(false)
+
+  // Connection status
+  lastTestAt          DateTime?
+  lastTestSuccess     Boolean?
+
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  @@map("email_configs")
+}
+
+model EmailCampaign {
+  id                    String   @id @default(uuid())
+  tenantId              String
+  tenant                Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  // Campaign details
+  name                  String
+  subject               String
+  fromAddress           String
+  replyTo               String?
+  htmlBody              String?  @db.Text
+
+  // ReachMail IDs
+  reachmailCampaignId   String?
+  reachmailMailingId    String?
+  reachmailListId       String?
+
+  // Recipient tracking
+  recipientCount        Int      @default(0)
+
+  // Status
+  status                EmailCampaignStatus @default(DRAFT)
+  scheduledAt           DateTime?
+  sentAt                DateTime?
+
+  // Analytics (cached from ReachMail)
+  sent                  Int      @default(0)
+  delivered             Int      @default(0)
+  opens                 Int      @default(0)
+  uniqueOpens           Int      @default(0)
+  clicks                Int      @default(0)
+  uniqueClicks          Int      @default(0)
+  bounces               Int      @default(0)
+  optOuts               Int      @default(0)
+  lastStatsUpdate       DateTime?
+
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  @@index([tenantId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("email_campaigns")
+}
+
+enum EmailCampaignStatus {
+  DRAFT
+  SCHEDULED
+  SENDING
+  SENT
+  PAUSED
+  CANCELLED
+  FAILED
+}
+
+// ============================================================================
+// SWOTSPOT.AI - LOCAL BUSINESS AUDIT
+// ============================================================================
+
+model SwotspotConfig {
+  id                String   @id @default(uuid())
+  tenantId          String   @unique
+  tenant            Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  apiKey            String   @db.Text    // Encrypted with AES-256-GCM
+  accountId         String?              // From SWOTSPOT API
+
+  lastTestAt        DateTime?
+  lastTestSuccess   Boolean?
+
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@map("swotspot_configs")
+}
+
+model SwotspotAudit {
+  id                String   @id @default(uuid())
+  tenantId          String
+  tenant            Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  businessName      String
+  address           String
+  city              String
+  state             String
+  zip               String?
+  industry          String?
+
+  externalAuditId   String?              // SWOTSPOT API ID
+  overallScore      Int?
+  reportData        Json?    @db.JsonB   // Full cached SWOT report
+
+  status            SwotspotAuditStatus @default(PENDING)
+  completedAt       DateTime?
+
+  // Relations
+  competitors       SwotspotCompetitor[]
+
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@index([tenantId])
+  @@index([status])
+  @@map("swotspot_audits")
+}
+
+model SwotspotCompetitor {
+  id                 String   @id @default(uuid())
+  tenantId           String
+  tenant             Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  auditId            String
+  audit              SwotspotAudit @relation(fields: [auditId], references: [id])
+
+  businessName       String
+  location           String
+  externalTrackingId String?
+  lastReportData     Json?    @db.JsonB
+  isActive           Boolean  @default(true)
+
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  @@index([tenantId])
+  @@index([auditId])
+  @@map("swotspot_competitors")
+}
+
+enum SwotspotAuditStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
 }

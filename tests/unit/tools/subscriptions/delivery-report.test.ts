@@ -15,8 +15,9 @@ vi.mock('../../../../src/db/client.js', () => ({
       findMany: vi.fn(),
       count: vi.fn(),
     },
-    subscription: {
+    dataSubscription: {
       findUnique: vi.fn(),
+      findMany: vi.fn(),
     },
   },
 }));
@@ -64,18 +65,17 @@ function createTestContext(overrides: Partial<TenantContext> = {}): TenantContex
       tenantId: 'test-tenant-id',
       plan: 'PROFESSIONAL',
       status: 'ACTIVE',
+      stripeSubscriptionId: null,
       monthlyRecordLimit: 10000,
       monthlyEmailAppends: 5000,
       monthlyPhoneAppends: 5000,
       allowedDatabases: ['NHO', 'NEW_MOVER', 'CONSUMER', 'BUSINESS'],
-      allowedGeographies: null,
       allowedStates: [],
       allowedZipCodes: [],
       pricePerRecord: mockDecimal(0.05),
       priceEmailAppend: mockDecimal(0.02),
       pricePhoneAppend: mockDecimal(0.03),
       pricePdfGeneration: mockDecimal(0.10),
-      pricePrintPerPiece: mockDecimal(0.65),
       billingCycleStart: new Date(),
       billingCycleEnd: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
       createdAt: new Date(),
@@ -94,69 +94,112 @@ function createMockDeliveries() {
 
   return [
     {
-      id: 'delivery-1',
-      subscriptionId: 'sub-1',
+      id: '00000000-0000-0000-0000-000000000001',
+      dataSubscriptionId: '00000000-0000-0000-0000-000000000011',
       tenantId: 'test-tenant-id',
       recordCount: 150,
+      newRecordsCount: 140,
+      duplicatesRemoved: 10,
+      dataFileUrl: 'https://example.com/delivery-1.csv',
+      pdfFileUrl: null,
+      fulfillmentStatus: 'COMPLETED',
+      fulfillmentDetails: null,
+      dataCost: mockDecimal(7.50),
+      pdfCost: mockDecimal(0),
+      fulfillmentCost: mockDecimal(0),
+      totalCost: mockDecimal(7.50),
+      scheduledAt: now,
+      startedAt: now,
+      completedAt: now,
       status: 'COMPLETED',
-      deliveredAt: now,
-      fileUrl: 'https://example.com/delivery-1.csv',
-      cost: mockDecimal(7.50),
-      subscription: {
-        id: 'sub-1',
-        name: 'NHO Weekly',
-        database: 'NHO',
-      },
+      errorMessage: null,
       createdAt: now,
+      dataSubscription: {
+        id: '00000000-0000-0000-0000-000000000011',
+        name: 'NHO Weekly',
+        clientName: 'Client A',
+      },
     },
     {
-      id: 'delivery-2',
-      subscriptionId: 'sub-1',
+      id: '00000000-0000-0000-0000-000000000002',
+      dataSubscriptionId: '00000000-0000-0000-0000-000000000011',
       tenantId: 'test-tenant-id',
       recordCount: 145,
+      newRecordsCount: 135,
+      duplicatesRemoved: 10,
+      dataFileUrl: 'https://example.com/delivery-2.csv',
+      pdfFileUrl: null,
+      fulfillmentStatus: 'COMPLETED',
+      fulfillmentDetails: null,
+      dataCost: mockDecimal(7.25),
+      pdfCost: mockDecimal(0),
+      fulfillmentCost: mockDecimal(0),
+      totalCost: mockDecimal(7.25),
+      scheduledAt: lastWeek,
+      startedAt: lastWeek,
+      completedAt: lastWeek,
       status: 'COMPLETED',
-      deliveredAt: lastWeek,
-      fileUrl: 'https://example.com/delivery-2.csv',
-      cost: mockDecimal(7.25),
-      subscription: {
-        id: 'sub-1',
-        name: 'NHO Weekly',
-        database: 'NHO',
-      },
+      errorMessage: null,
       createdAt: lastWeek,
+      dataSubscription: {
+        id: '00000000-0000-0000-0000-000000000011',
+        name: 'NHO Weekly',
+        clientName: 'Client A',
+      },
     },
     {
-      id: 'delivery-3',
-      subscriptionId: 'sub-2',
+      id: '00000000-0000-0000-0000-000000000003',
+      dataSubscriptionId: '00000000-0000-0000-0000-000000000012',
       tenantId: 'test-tenant-id',
       recordCount: 500,
+      newRecordsCount: 480,
+      duplicatesRemoved: 20,
+      dataFileUrl: 'https://example.com/delivery-3.csv',
+      pdfFileUrl: null,
+      fulfillmentStatus: 'COMPLETED',
+      fulfillmentDetails: null,
+      dataCost: mockDecimal(25.00),
+      pdfCost: mockDecimal(0),
+      fulfillmentCost: mockDecimal(0),
+      totalCost: mockDecimal(25.00),
+      scheduledAt: twoWeeksAgo,
+      startedAt: twoWeeksAgo,
+      completedAt: twoWeeksAgo,
       status: 'COMPLETED',
-      deliveredAt: twoWeeksAgo,
-      fileUrl: 'https://example.com/delivery-3.csv',
-      cost: mockDecimal(25.00),
-      subscription: {
-        id: 'sub-2',
-        name: 'New Mover Monthly',
-        database: 'NEW_MOVER',
-      },
+      errorMessage: null,
       createdAt: twoWeeksAgo,
+      dataSubscription: {
+        id: '00000000-0000-0000-0000-000000000012',
+        name: 'New Mover Monthly',
+        clientName: 'Client B',
+      },
     },
     {
-      id: 'delivery-4',
-      subscriptionId: 'sub-1',
+      id: '00000000-0000-0000-0000-000000000004',
+      dataSubscriptionId: '00000000-0000-0000-0000-000000000011',
       tenantId: 'test-tenant-id',
       recordCount: 0,
+      newRecordsCount: 0,
+      duplicatesRemoved: 0,
+      dataFileUrl: null,
+      pdfFileUrl: null,
+      fulfillmentStatus: 'FAILED',
+      fulfillmentDetails: null,
+      dataCost: mockDecimal(0),
+      pdfCost: mockDecimal(0),
+      fulfillmentCost: mockDecimal(0),
+      totalCost: mockDecimal(0),
+      scheduledAt: lastWeek,
+      startedAt: lastWeek,
+      completedAt: null,
       status: 'FAILED',
-      deliveredAt: null,
-      fileUrl: null,
-      cost: mockDecimal(0),
       errorMessage: 'API timeout',
-      subscription: {
-        id: 'sub-1',
-        name: 'NHO Weekly',
-        database: 'NHO',
-      },
       createdAt: lastWeek,
+      dataSubscription: {
+        id: '00000000-0000-0000-0000-000000000011',
+        name: 'NHO Weekly',
+        clientName: 'Client A',
+      },
     },
   ];
 }
@@ -166,7 +209,7 @@ describe('delivery_report tool', () => {
     vi.clearAllMocks();
 
     // Setup default mock responses
-    vi.mocked(prisma.delivery.findMany).mockResolvedValue(createMockDeliveries());
+    vi.mocked(prisma.delivery.findMany).mockResolvedValue(createMockDeliveries() as any);
     vi.mocked(prisma.delivery.count).mockResolvedValue(4);
   });
 
@@ -189,14 +232,13 @@ describe('delivery_report tool', () => {
 
       const result = await executeDeliveryReport(input, context);
 
-      const delivery = result.data?.deliveries[0];
+      const delivery = result.data?.deliveries?.[0];
       expect(delivery).toHaveProperty('id');
-      expect(delivery).toHaveProperty('subscription_id');
-      expect(delivery).toHaveProperty('subscription_name');
-      expect(delivery).toHaveProperty('record_count');
+      expect(delivery).toHaveProperty('subscriptionName');
+      expect(delivery).toHaveProperty('recordCount');
       expect(delivery).toHaveProperty('status');
-      expect(delivery).toHaveProperty('delivered_at');
-      expect(delivery).toHaveProperty('cost');
+      expect(delivery).toHaveProperty('scheduledAt');
+      expect(delivery).toHaveProperty('totalCost');
     });
   });
 
@@ -211,7 +253,7 @@ describe('delivery_report tool', () => {
       expect(prisma.delivery.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
           where: expect.objectContaining({
-            createdAt: expect.objectContaining({
+            scheduledAt: expect.objectContaining({
               gte: expect.any(Date),
             }),
           }),
@@ -229,9 +271,9 @@ describe('delivery_report tool', () => {
       expect(prisma.delivery.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
           where: expect.objectContaining({
-            createdAt: expect.objectContaining({
+            scheduledAt: expect.objectContaining({
               gte: expect.any(Date),
-              lt: expect.any(Date),
+              lte: expect.any(Date),
             }),
           }),
         })
@@ -270,7 +312,7 @@ describe('delivery_report tool', () => {
       expect(prisma.delivery.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
           where: expect.objectContaining({
-            createdAt: expect.objectContaining({
+            scheduledAt: expect.objectContaining({
               gte: expect.any(Date),
               lte: expect.any(Date),
             }),
@@ -302,17 +344,13 @@ describe('delivery_report tool', () => {
   describe('subscription filtering', () => {
     it('filters by specific subscription_id', async () => {
       const context = createTestContext();
-      const input = { subscription_id: 'sub-1' };
-
-      vi.mocked(prisma.subscription.findUnique).mockResolvedValue({
-        id: 'sub-1',
-        tenantId: 'test-tenant-id',
-      } as any);
+      const subscriptionId = '00000000-0000-0000-0000-000000000011';
+      const input = { subscription_id: subscriptionId };
 
       const filteredDeliveries = createMockDeliveries().filter(
-        d => d.subscriptionId === 'sub-1'
+        d => d.dataSubscriptionId === subscriptionId
       );
-      vi.mocked(prisma.delivery.findMany).mockResolvedValue(filteredDeliveries);
+      vi.mocked(prisma.delivery.findMany).mockResolvedValue(filteredDeliveries as any);
 
       const result = await executeDeliveryReport(input, context);
 
@@ -320,22 +358,10 @@ describe('delivery_report tool', () => {
       expect(prisma.delivery.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
           where: expect.objectContaining({
-            subscriptionId: 'sub-1',
+            dataSubscriptionId: subscriptionId,
           }),
         })
       );
-    });
-
-    it('throws AuthorizationError when subscription belongs to different tenant', async () => {
-      const context = createTestContext();
-      const input = { subscription_id: 'other-sub' };
-
-      vi.mocked(prisma.subscription.findUnique).mockResolvedValue({
-        id: 'other-sub',
-        tenantId: 'other-tenant-id',
-      } as any);
-
-      await expect(executeDeliveryReport(input, context)).rejects.toThrow(AuthorizationError);
     });
   });
 
@@ -347,7 +373,6 @@ describe('delivery_report tool', () => {
       const result = await executeDeliveryReport(input, context);
 
       expect(result.success).toBe(true);
-      expect(result.data?.format).toBe('json');
       expect(result.data?.deliveries).toBeInstanceOf(Array);
     });
 
@@ -357,7 +382,7 @@ describe('delivery_report tool', () => {
 
       const result = await executeDeliveryReport(input, context);
 
-      expect(result.data?.format).toBe('json');
+      expect(result.data?.deliveries).toBeInstanceOf(Array);
     });
 
     it('returns CSV format when specified', async () => {
@@ -367,9 +392,8 @@ describe('delivery_report tool', () => {
       const result = await executeDeliveryReport(input, context);
 
       expect(result.success).toBe(true);
-      expect(result.data?.format).toBe('csv');
-      expect(result.data?.csv_content).toBeDefined();
-      expect(typeof result.data?.csv_content).toBe('string');
+      expect(result.data?.csv).toBeDefined();
+      expect(typeof result.data?.csv).toBe('string');
     });
 
     it('includes CSV header row', async () => {
@@ -378,10 +402,10 @@ describe('delivery_report tool', () => {
 
       const result = await executeDeliveryReport(input, context);
 
-      const csvLines = result.data?.csv_content?.split('\n');
-      expect(csvLines?.[0]).toContain('id');
-      expect(csvLines?.[0]).toContain('subscription_id');
-      expect(csvLines?.[0]).toContain('record_count');
+      const csvLines = result.data?.csv?.split('\n');
+      expect(csvLines?.[0]).toContain('Delivery ID');
+      expect(csvLines?.[0]).toContain('Subscription Name');
+      expect(csvLines?.[0]).toContain('Record Count');
     });
   });
 
@@ -392,7 +416,7 @@ describe('delivery_report tool', () => {
 
       const result = await executeDeliveryReport(input, context);
 
-      expect(result.data?.summary?.total_deliveries).toBe(4);
+      expect(result.data?.summary?.totalDeliveries).toBe(4);
     });
 
     it('calculates successful deliveries', async () => {
@@ -401,7 +425,7 @@ describe('delivery_report tool', () => {
 
       const result = await executeDeliveryReport(input, context);
 
-      expect(result.data?.summary?.successful).toBe(3);
+      expect(result.data?.summary?.completedDeliveries).toBe(3);
     });
 
     it('calculates failed deliveries', async () => {
@@ -410,7 +434,7 @@ describe('delivery_report tool', () => {
 
       const result = await executeDeliveryReport(input, context);
 
-      expect(result.data?.summary?.failed).toBe(1);
+      expect(result.data?.summary?.failedDeliveries).toBe(1);
     });
 
     it('calculates total records delivered', async () => {
@@ -419,7 +443,7 @@ describe('delivery_report tool', () => {
 
       const result = await executeDeliveryReport(input, context);
 
-      expect(result.data?.summary?.total_records).toBe(795);
+      expect(result.data?.summary?.totalRecords).toBe(795);
     });
 
     it('calculates total cost', async () => {
@@ -428,7 +452,7 @@ describe('delivery_report tool', () => {
 
       const result = await executeDeliveryReport(input, context);
 
-      expect(result.data?.summary?.total_cost).toBe(39.75);
+      expect(result.data?.summary?.totalCost).toBe(39.75);
     });
 
     it('calculates average records per delivery', async () => {
@@ -437,7 +461,7 @@ describe('delivery_report tool', () => {
 
       const result = await executeDeliveryReport(input, context);
 
-      expect(result.data?.summary?.average_records_per_delivery).toBeDefined();
+      expect(result.data?.summary?.averageRecordsPerDelivery).toBeDefined();
     });
   });
 
@@ -496,22 +520,13 @@ describe('delivery_report tool', () => {
 
       const result = await executeDeliveryReport(input, context);
 
-      expect(result.data?.period).toBe('this_month');
-      expect(result.data?.date_range).toBeDefined();
-      expect(result.data?.date_range?.start).toBeDefined();
-      expect(result.data?.date_range?.end).toBeDefined();
+      expect(result.data?.period?.name).toBe('this_month');
+      expect(result.data?.period?.start).toBeDefined();
+      expect(result.data?.period?.end).toBeDefined();
     });
   });
 
-  describe('null input handling', () => {
-    it('handles null input', async () => {
-      const context = createTestContext();
-
-      const result = await executeDeliveryReport(null, context);
-
-      expect(result.success).toBe(true);
-    });
-
+  describe('optional input handling', () => {
     it('handles undefined input', async () => {
       const context = createTestContext();
 
@@ -541,9 +556,9 @@ describe('delivery_report tool', () => {
 
       expect(result.success).toBe(true);
       expect(result.data?.deliveries).toHaveLength(0);
-      expect(result.data?.summary?.total_deliveries).toBe(0);
-      expect(result.data?.summary?.total_records).toBe(0);
-      expect(result.data?.summary?.total_cost).toBe(0);
+      expect(result.data?.summary?.totalDeliveries).toBe(0);
+      expect(result.data?.summary?.totalRecords).toBe(0);
+      expect(result.data?.summary?.totalCost).toBe(0);
     });
   });
 

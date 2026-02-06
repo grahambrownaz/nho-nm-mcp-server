@@ -4,37 +4,34 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { executeCreateCheckoutSession } from '../../../../src/tools/billing/create-checkout-session.js';
-import { stripeBillingService } from '../../../../src/services/stripe-billing.js';
-import { prisma } from '../../../../src/db/client.js';
+import * as stripeBilling from '../../../../src/services/stripe-billing.js';
 import type { TenantContext } from '../../../../src/utils/auth.js';
-import { ValidationError, AuthorizationError } from '../../../../src/utils/errors.js';
+import { AuthorizationError } from '../../../../src/utils/errors.js';
 
 // Mock Stripe billing service
 vi.mock('../../../../src/services/stripe-billing.js', () => ({
-  stripeBillingService: {
-    createCheckoutSession: vi.fn(),
-    createCustomer: vi.fn(),
-  },
-}));
-
-// Mock Prisma client
-vi.mock('../../../../src/db/client.js', () => ({
-  prisma: {
-    tenant: {
-      findUnique: vi.fn(),
-      update: vi.fn(),
+  createCheckoutSession: vi.fn(),
+  PLANS: {
+    starter: {
+      name: 'Starter',
+      platformPriceId: 'price_starter_monthly',
+      monthlyFee: 29,
+      features: ['Up to 500 records/month', 'Email support', '1 subscription'],
+    },
+    growth: {
+      name: 'Growth',
+      platformPriceId: 'price_growth_monthly',
+      monthlyFee: 49,
+      features: ['Up to 2,500 records/month', 'Priority support', '5 subscriptions'],
+    },
+    pro: {
+      name: 'Professional',
+      platformPriceId: 'price_pro_monthly',
+      monthlyFee: 99,
+      features: ['Unlimited records', 'Dedicated support', 'Unlimited subscriptions'],
     },
   },
 }));
-
-// Mock Decimal type
-function mockDecimal(value: number) {
-  return {
-    toNumber: () => value,
-    toString: () => String(value),
-    valueOf: () => value,
-  } as any;
-}
 
 // Create a valid tenant context for tests
 function createTestContext(overrides: Partial<TenantContext> = {}): TenantContext {
@@ -71,46 +68,22 @@ function createTestContext(overrides: Partial<TenantContext> = {}): TenantContex
   };
 }
 
-// Price IDs for different plans
-const PRICE_IDS = {
-  starter_monthly: 'price_starter_monthly_123',
-  starter_annual: 'price_starter_annual_123',
-  growth_monthly: 'price_growth_monthly_456',
-  growth_annual: 'price_growth_annual_456',
-  pro_monthly: 'price_pro_monthly_789',
-  pro_annual: 'price_pro_annual_789',
-};
-
 describe('create_checkout_session tool', () => {
   beforeEach(() => {
     vi.clearAllMocks();
 
-    // Default mock responses
-    vi.mocked(stripeBillingService.createCheckoutSession).mockResolvedValue({
-      id: 'cs_test_123',
+    // Default mock response
+    vi.mocked(stripeBilling.createCheckoutSession).mockResolvedValue({
+      sessionId: 'cs_test_123',
       url: 'https://checkout.stripe.com/pay/cs_test_123',
-    } as any);
-    vi.mocked(stripeBillingService.createCustomer).mockResolvedValue({
-      id: 'cus_new_123',
-    } as any);
-    vi.mocked(prisma.tenant.findUnique).mockResolvedValue({
-      id: 'test-tenant-id',
-      name: 'Test Tenant',
-      email: 'test@example.com',
-      stripeCustomerId: null,
-    } as any);
-    vi.mocked(prisma.tenant.update).mockResolvedValue({
-      id: 'test-tenant-id',
-      stripeCustomerId: 'cus_new_123',
-    } as any);
+    });
   });
 
   describe('starter plan', () => {
-    it('generates checkout URL for starter plan monthly', async () => {
+    it('generates checkout URL for starter plan', async () => {
       const context = createTestContext();
       const input = {
-        plan: 'starter',
-        billing_period: 'monthly',
+        plan_type: 'starter',
         success_url: 'https://app.example.com/billing/success',
         cancel_url: 'https://app.example.com/billing/cancel',
       };
@@ -119,39 +92,16 @@ describe('create_checkout_session tool', () => {
 
       expect(result.success).toBe(true);
       expect(result.data?.checkout_url).toContain('checkout.stripe.com');
-      expect(stripeBillingService.createCheckoutSession).toHaveBeenCalledWith(
-        expect.objectContaining({
-          priceId: expect.stringContaining('starter'),
-        })
-      );
-    });
-
-    it('generates checkout URL for starter plan annual', async () => {
-      const context = createTestContext();
-      const input = {
-        plan: 'starter',
-        billing_period: 'annual',
-        success_url: 'https://app.example.com/billing/success',
-        cancel_url: 'https://app.example.com/billing/cancel',
-      };
-
-      const result = await executeCreateCheckoutSession(input, context);
-
-      expect(result.success).toBe(true);
-      expect(stripeBillingService.createCheckoutSession).toHaveBeenCalledWith(
-        expect.objectContaining({
-          priceId: expect.stringContaining('annual'),
-        })
-      );
+      expect(result.data?.plan.name).toBe('Starter');
+      expect(result.data?.plan.monthly_fee).toBe(29);
     });
   });
 
   describe('growth plan', () => {
-    it('generates checkout URL for growth plan monthly', async () => {
+    it('generates checkout URL for growth plan', async () => {
       const context = createTestContext();
       const input = {
-        plan: 'growth',
-        billing_period: 'monthly',
+        plan_type: 'growth',
         success_url: 'https://app.example.com/billing/success',
         cancel_url: 'https://app.example.com/billing/cancel',
       };
@@ -159,34 +109,16 @@ describe('create_checkout_session tool', () => {
       const result = await executeCreateCheckoutSession(input, context);
 
       expect(result.success).toBe(true);
-      expect(stripeBillingService.createCheckoutSession).toHaveBeenCalledWith(
-        expect.objectContaining({
-          priceId: expect.stringContaining('growth'),
-        })
-      );
-    });
-
-    it('generates checkout URL for growth plan annual', async () => {
-      const context = createTestContext();
-      const input = {
-        plan: 'growth',
-        billing_period: 'annual',
-        success_url: 'https://app.example.com/billing/success',
-        cancel_url: 'https://app.example.com/billing/cancel',
-      };
-
-      const result = await executeCreateCheckoutSession(input, context);
-
-      expect(result.success).toBe(true);
+      expect(result.data?.plan.name).toBe('Growth');
+      expect(result.data?.plan.monthly_fee).toBe(49);
     });
   });
 
   describe('pro plan', () => {
-    it('generates checkout URL for pro plan monthly', async () => {
+    it('generates checkout URL for pro plan', async () => {
       const context = createTestContext();
       const input = {
-        plan: 'pro',
-        billing_period: 'monthly',
+        plan_type: 'pro',
         success_url: 'https://app.example.com/billing/success',
         cancel_url: 'https://app.example.com/billing/cancel',
       };
@@ -194,150 +126,134 @@ describe('create_checkout_session tool', () => {
       const result = await executeCreateCheckoutSession(input, context);
 
       expect(result.success).toBe(true);
-      expect(stripeBillingService.createCheckoutSession).toHaveBeenCalledWith(
-        expect.objectContaining({
-          priceId: expect.stringContaining('pro'),
-        })
-      );
-    });
-
-    it('generates checkout URL for pro plan annual', async () => {
-      const context = createTestContext();
-      const input = {
-        plan: 'pro',
-        billing_period: 'annual',
-        success_url: 'https://app.example.com/billing/success',
-        cancel_url: 'https://app.example.com/billing/cancel',
-      };
-
-      const result = await executeCreateCheckoutSession(input, context);
-
-      expect(result.success).toBe(true);
+      expect(result.data?.plan.name).toBe('Professional');
+      expect(result.data?.plan.monthly_fee).toBe(99);
     });
   });
 
-  describe('price IDs', () => {
-    it('includes correct price ID for starter monthly', async () => {
+  describe('checkout session parameters', () => {
+    it('passes plan type to createCheckoutSession', async () => {
       const context = createTestContext();
       const input = {
-        plan: 'starter',
-        billing_period: 'monthly',
+        plan_type: 'starter',
         success_url: 'https://app.example.com/success',
         cancel_url: 'https://app.example.com/cancel',
       };
 
       await executeCreateCheckoutSession(input, context);
 
-      expect(stripeBillingService.createCheckoutSession).toHaveBeenCalledWith(
+      expect(stripeBilling.createCheckoutSession).toHaveBeenCalledWith(
         expect.objectContaining({
-          priceId: expect.any(String),
+          planType: 'starter',
         })
       );
     });
 
-    it('includes metered price IDs for usage-based billing', async () => {
+    it('includes URLs in checkout session', async () => {
       const context = createTestContext();
       const input = {
-        plan: 'growth',
-        billing_period: 'monthly',
+        plan_type: 'growth',
         success_url: 'https://app.example.com/success',
         cancel_url: 'https://app.example.com/cancel',
       };
 
       await executeCreateCheckoutSession(input, context);
 
-      // Growth plan should include metered pricing
-      expect(stripeBillingService.createCheckoutSession).toHaveBeenCalled();
+      expect(stripeBilling.createCheckoutSession).toHaveBeenCalledWith(
+        expect.objectContaining({
+          successUrl: 'https://app.example.com/success',
+          cancelUrl: 'https://app.example.com/cancel',
+        })
+      );
     });
   });
 
   describe('tenant metadata', () => {
-    it('includes tenant metadata in session', async () => {
+    it('includes tenant ID in metadata', async () => {
       const context = createTestContext();
       const input = {
-        plan: 'starter',
-        billing_period: 'monthly',
+        plan_type: 'starter',
         success_url: 'https://app.example.com/success',
         cancel_url: 'https://app.example.com/cancel',
       };
 
       await executeCreateCheckoutSession(input, context);
 
-      expect(stripeBillingService.createCheckoutSession).toHaveBeenCalledWith(
+      expect(stripeBilling.createCheckoutSession).toHaveBeenCalledWith(
         expect.objectContaining({
-          tenantId: 'test-tenant-id',
           metadata: expect.objectContaining({
-            plan: 'starter',
+            tenantId: 'test-tenant-id',
           }),
         })
       );
     });
 
-    it('includes existing customer ID when available', async () => {
-      const context = createTestContext({
-        tenant: {
-          id: 'test-tenant-id',
-          name: 'Existing Tenant',
-          email: 'existing@example.com',
-          stripeCustomerId: 'cus_existing_123',
-          company: null,
-          phone: null,
-          status: 'ACTIVE',
-          parentTenantId: null,
-          isReseller: false,
-          wholesalePricing: null,
-          createdAt: new Date(),
-          updatedAt: new Date(),
-        },
-      });
-
-      vi.mocked(prisma.tenant.findUnique).mockResolvedValue({
-        id: 'test-tenant-id',
-        stripeCustomerId: 'cus_existing_123',
-      } as any);
-
+    it('includes custom metadata when provided', async () => {
+      const context = createTestContext();
       const input = {
-        plan: 'growth',
-        billing_period: 'monthly',
+        plan_type: 'starter',
         success_url: 'https://app.example.com/success',
         cancel_url: 'https://app.example.com/cancel',
+        metadata: {
+          referrer: 'marketing_campaign',
+        },
       };
 
       await executeCreateCheckoutSession(input, context);
 
-      expect(stripeBillingService.createCheckoutSession).toHaveBeenCalledWith(
+      expect(stripeBilling.createCheckoutSession).toHaveBeenCalledWith(
         expect.objectContaining({
-          customerId: 'cus_existing_123',
+          metadata: expect.objectContaining({
+            referrer: 'marketing_campaign',
+          }),
         })
       );
     });
 
-    it('creates new customer when none exists', async () => {
+    it('uses tenant email and name', async () => {
       const context = createTestContext();
       const input = {
-        plan: 'starter',
-        billing_period: 'monthly',
+        plan_type: 'growth',
         success_url: 'https://app.example.com/success',
         cancel_url: 'https://app.example.com/cancel',
       };
 
       await executeCreateCheckoutSession(input, context);
 
-      expect(stripeBillingService.createCustomer).toHaveBeenCalledWith(
+      expect(stripeBilling.createCheckoutSession).toHaveBeenCalledWith(
         expect.objectContaining({
-          email: 'test@example.com',
-          tenantId: 'test-tenant-id',
+          tenantEmail: 'test@example.com',
+          tenantName: 'Test Tenant',
+        })
+      );
+    });
+
+    it('allows overriding tenant email and name', async () => {
+      const context = createTestContext();
+      const input = {
+        plan_type: 'starter',
+        success_url: 'https://app.example.com/success',
+        cancel_url: 'https://app.example.com/cancel',
+        tenant_email: 'custom@example.com',
+        tenant_name: 'Custom Name',
+      };
+
+      await executeCreateCheckoutSession(input, context);
+
+      expect(stripeBilling.createCheckoutSession).toHaveBeenCalledWith(
+        expect.objectContaining({
+          tenantEmail: 'custom@example.com',
+          tenantName: 'Custom Name',
         })
       );
     });
   });
 
   describe('input validation', () => {
-    it('throws ValidationError for invalid plan', async () => {
+    it('throws error for invalid plan', async () => {
       const context = createTestContext();
       const input = {
-        plan: 'invalid_plan',
-        billing_period: 'monthly',
+        plan_type: 'invalid_plan',
         success_url: 'https://app.example.com/success',
         cancel_url: 'https://app.example.com/cancel',
       };
@@ -345,34 +261,30 @@ describe('create_checkout_session tool', () => {
       await expect(executeCreateCheckoutSession(input, context)).rejects.toThrow();
     });
 
-    it('throws ValidationError for invalid billing period', async () => {
+    it('throws error for missing success_url', async () => {
       const context = createTestContext();
       const input = {
-        plan: 'starter',
-        billing_period: 'weekly',
+        plan_type: 'starter',
+        cancel_url: 'https://app.example.com/cancel',
+      };
+
+      await expect(executeCreateCheckoutSession(input, context)).rejects.toThrow();
+    });
+
+    it('throws error for missing cancel_url', async () => {
+      const context = createTestContext();
+      const input = {
+        plan_type: 'starter',
         success_url: 'https://app.example.com/success',
-        cancel_url: 'https://app.example.com/cancel',
       };
 
       await expect(executeCreateCheckoutSession(input, context)).rejects.toThrow();
     });
 
-    it('throws ValidationError for missing success_url', async () => {
+    it('throws error for invalid URL format', async () => {
       const context = createTestContext();
       const input = {
-        plan: 'starter',
-        billing_period: 'monthly',
-        cancel_url: 'https://app.example.com/cancel',
-      };
-
-      await expect(executeCreateCheckoutSession(input, context)).rejects.toThrow();
-    });
-
-    it('throws ValidationError for invalid URL format', async () => {
-      const context = createTestContext();
-      const input = {
-        plan: 'starter',
-        billing_period: 'monthly',
+        plan_type: 'starter',
         success_url: 'not-a-valid-url',
         cancel_url: 'https://app.example.com/cancel',
       };
@@ -382,13 +294,12 @@ describe('create_checkout_session tool', () => {
   });
 
   describe('permission checks', () => {
-    it('throws AuthorizationError when missing billing:write permission', async () => {
+    it('throws AuthorizationError when missing subscription:write permission', async () => {
       const context = createTestContext({
         permissions: ['data:read'],
       });
       const input = {
-        plan: 'starter',
-        billing_period: 'monthly',
+        plan_type: 'starter',
         success_url: 'https://app.example.com/success',
         cancel_url: 'https://app.example.com/cancel',
       };
@@ -396,13 +307,12 @@ describe('create_checkout_session tool', () => {
       await expect(executeCreateCheckoutSession(input, context)).rejects.toThrow(AuthorizationError);
     });
 
-    it('allows access with billing:write permission', async () => {
+    it('allows access with subscription:write permission', async () => {
       const context = createTestContext({
-        permissions: ['billing:write'],
+        permissions: ['subscription:write'],
       });
       const input = {
-        plan: 'starter',
-        billing_period: 'monthly',
+        plan_type: 'starter',
         success_url: 'https://app.example.com/success',
         cancel_url: 'https://app.example.com/cancel',
       };
@@ -416,8 +326,7 @@ describe('create_checkout_session tool', () => {
         permissions: ['*'],
       });
       const input = {
-        plan: 'growth',
-        billing_period: 'annual',
+        plan_type: 'growth',
         success_url: 'https://app.example.com/success',
         cancel_url: 'https://app.example.com/cancel',
       };
@@ -427,51 +336,11 @@ describe('create_checkout_session tool', () => {
     });
   });
 
-  describe('trial period', () => {
-    it('includes trial when specified', async () => {
-      const context = createTestContext();
-      const input = {
-        plan: 'growth',
-        billing_period: 'monthly',
-        success_url: 'https://app.example.com/success',
-        cancel_url: 'https://app.example.com/cancel',
-        trial_days: 14,
-      };
-
-      await executeCreateCheckoutSession(input, context);
-
-      expect(stripeBillingService.createCheckoutSession).toHaveBeenCalledWith(
-        expect.objectContaining({
-          trialDays: 14,
-        })
-      );
-    });
-  });
-
-  describe('error handling', () => {
-    it('handles Stripe API errors', async () => {
-      const context = createTestContext();
-      const input = {
-        plan: 'starter',
-        billing_period: 'monthly',
-        success_url: 'https://app.example.com/success',
-        cancel_url: 'https://app.example.com/cancel',
-      };
-
-      vi.mocked(stripeBillingService.createCheckoutSession).mockRejectedValue(
-        new Error('Stripe API error')
-      );
-
-      await expect(executeCreateCheckoutSession(input, context)).rejects.toThrow('Stripe API error');
-    });
-  });
-
   describe('response format', () => {
     it('returns checkout URL and session ID', async () => {
       const context = createTestContext();
       const input = {
-        plan: 'starter',
-        billing_period: 'monthly',
+        plan_type: 'starter',
         success_url: 'https://app.example.com/success',
         cancel_url: 'https://app.example.com/cancel',
       };
@@ -481,6 +350,55 @@ describe('create_checkout_session tool', () => {
       expect(result.success).toBe(true);
       expect(result.data?.checkout_url).toBeDefined();
       expect(result.data?.session_id).toBe('cs_test_123');
+    });
+
+    it('returns plan details', async () => {
+      const context = createTestContext();
+      const input = {
+        plan_type: 'growth',
+        success_url: 'https://app.example.com/success',
+        cancel_url: 'https://app.example.com/cancel',
+      };
+
+      const result = await executeCreateCheckoutSession(input, context);
+
+      expect(result.data?.plan).toBeDefined();
+      expect(result.data?.plan.name).toBe('Growth');
+      expect(result.data?.plan.monthly_fee).toBe(49);
+      expect(result.data?.plan.features).toBeDefined();
+    });
+
+    it('returns expiration timestamp', async () => {
+      const context = createTestContext();
+      const input = {
+        plan_type: 'starter',
+        success_url: 'https://app.example.com/success',
+        cancel_url: 'https://app.example.com/cancel',
+      };
+
+      const result = await executeCreateCheckoutSession(input, context);
+
+      expect(result.data?.expires_at).toBeDefined();
+    });
+  });
+
+  describe('error handling', () => {
+    it('returns error response on Stripe API errors', async () => {
+      const context = createTestContext();
+      const input = {
+        plan_type: 'starter',
+        success_url: 'https://app.example.com/success',
+        cancel_url: 'https://app.example.com/cancel',
+      };
+
+      vi.mocked(stripeBilling.createCheckoutSession).mockRejectedValue(
+        new Error('Stripe API error')
+      );
+
+      const result = await executeCreateCheckoutSession(input, context);
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('Stripe API error');
     });
   });
 });

@@ -17,15 +17,16 @@ vi.mock('../../../../src/db/client.js', () => ({
   },
 }));
 
-// Mock sanitize-html
-vi.mock('sanitize-html', () => ({
-  default: vi.fn((html: string) => {
-    // Simplified mock - remove script tags and onclick handlers
+// Mock sanitize-html - pass through most content, only strip dangerous elements
+vi.mock('sanitize-html', () => {
+  const mockSanitize = vi.fn((html: string) => {
+    // Simplified mock - remove script tags and onclick handlers, preserve everything else
     return html
       .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
       .replace(/\s*on\w+="[^"]*"/gi, '');
-  }),
-}));
+  });
+  return { default: mockSanitize };
+});
 
 // Mock Decimal type that matches Prisma's Decimal behavior
 function mockDecimal(value: number) {
@@ -92,9 +93,19 @@ function createTestContext(overrides: Partial<TenantContext> = {}): TenantContex
   };
 }
 
+import sanitizeHtml from 'sanitize-html';
+
 describe('upload_template tool', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.resetAllMocks();
+
+    // Reset sanitize-html mock to default behavior
+    vi.mocked(sanitizeHtml).mockImplementation((html: string) => {
+      return html
+        .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+        .replace(/\s*on\w+="[^"]*"/gi, '');
+    });
 
     // Setup default mock response
     vi.mocked(prisma.template.create).mockResolvedValue({
@@ -124,7 +135,7 @@ describe('upload_template tool', () => {
       const result = await executeUploadTemplate(input, context);
 
       expect(result.success).toBe(true);
-      expect(result.data?.template_id).toBe('new-template-id');
+      expect(result.data?.template?.id).toBe('new-template-id');
       expect(prisma.template.create).toHaveBeenCalledTimes(1);
     });
 
@@ -147,7 +158,7 @@ describe('upload_template tool', () => {
         expect.objectContaining({
           data: expect.objectContaining({
             name: 'Full Template',
-            category: 'realtor',
+            category: 'REALTOR',
             size: 'SIZE_6X9',
             isPublic: true,
           }),
@@ -157,12 +168,15 @@ describe('upload_template tool', () => {
 
     it('accepts all valid categories', async () => {
       const context = createTestContext();
-      const categories = ['realtor', 'hvac', 'insurance', 'mortgage', 'solar', 'roofing', 'general', 'custom'];
+      const categories = ['realtor', 'hvac', 'insurance', 'landscaping', 'home_services', 'retail', 'general', 'custom'];
 
       for (const category of categories) {
         vi.mocked(prisma.template.create).mockResolvedValue({
           id: `template-${category}`,
-          category,
+          name: `${category} Template`,
+          category: category.toUpperCase(),
+          isPublic: false,
+          createdAt: new Date(),
         } as any);
 
         const input = {
@@ -183,7 +197,10 @@ describe('upload_template tool', () => {
       for (const size of sizes) {
         vi.mocked(prisma.template.create).mockResolvedValue({
           id: `template-${size}`,
+          name: `${size} Template`,
           size: `SIZE_${size.replace('x', 'X')}`,
+          isPublic: false,
+          createdAt: new Date(),
         } as any);
 
         const input = {
@@ -280,17 +297,18 @@ describe('upload_template tool', () => {
 
       const result = await executeUploadTemplate(input, context);
 
-      expect(result.data?.merge_fields).toBeDefined();
-      expect(result.data?.merge_fields).toContain('first_name');
+      expect(result.data?.template?.mergeFields).toBeDefined();
+      expect(result.data?.template?.mergeFields).toContain('first_name');
     });
   });
 
   describe('HTML sanitization', () => {
     it('sanitizes HTML to remove script tags', async () => {
       const context = createTestContext();
+      // Use HTML where removing script still leaves >50% content
       const input = {
         name: 'Test Template',
-        html_front: '<div>Hello</div><script>alert("xss")</script>',
+        html_front: '<div>Hello World this is a test template with lots of content</div><script>x</script>',
       };
 
       await executeUploadTemplate(input, context);
@@ -302,9 +320,10 @@ describe('upload_template tool', () => {
 
     it('sanitizes HTML to remove event handlers', async () => {
       const context = createTestContext();
+      // Use HTML where removing onclick still leaves >50% content
       const input = {
         name: 'Test Template',
-        html_front: '<div onclick="alert(\'xss\')">Hello</div>',
+        html_front: '<div onclick="x">Hello World this is a test template with lots of content</div>',
       };
 
       await executeUploadTemplate(input, context);
@@ -315,10 +334,9 @@ describe('upload_template tool', () => {
 
     it('rejects HTML with excessive content removed', async () => {
       const context = createTestContext();
-      const sanitizeHtml = await import('sanitize-html');
 
       // Mock to return mostly empty content (simulating >50% removal)
-      vi.mocked(sanitizeHtml.default).mockImplementation(() => '');
+      vi.mocked(sanitizeHtml).mockImplementation(() => '');
 
       const input = {
         name: 'Test Template',
@@ -372,7 +390,7 @@ describe('upload_template tool', () => {
       const context = createTestContext();
       const input = {
         name: 'Test Template',
-        html_front: '<div></div>', // Less than 10 chars of actual content
+        html_front: '<div>', // Less than 10 chars
       };
 
       await expect(executeUploadTemplate(input, context)).rejects.toThrow();
@@ -424,7 +442,7 @@ describe('upload_template tool', () => {
       expect(prisma.template.create).toHaveBeenCalledWith(
         expect.objectContaining({
           data: expect.objectContaining({
-            category: 'custom',
+            category: 'CUSTOM',
           }),
         })
       );
@@ -468,7 +486,7 @@ describe('upload_template tool', () => {
   });
 
   describe('permission checks', () => {
-    it('throws AuthorizationError when missing template:create permission', async () => {
+    it('throws AuthorizationError when missing template:write permission', async () => {
       const context = createTestContext({
         permissions: ['data:read'],
       });
@@ -480,9 +498,9 @@ describe('upload_template tool', () => {
       await expect(executeUploadTemplate(input, context)).rejects.toThrow(AuthorizationError);
     });
 
-    it('allows access with template:create permission', async () => {
+    it('allows access with template:write permission', async () => {
       const context = createTestContext({
-        permissions: ['template:create'],
+        permissions: ['template:write'],
       });
       const input = {
         name: 'Test Template',
@@ -537,10 +555,10 @@ describe('upload_template tool', () => {
 
       const result = await executeUploadTemplate(input, context);
 
-      expect(result.data?.template_id).toBeDefined();
-      expect(result.data?.name).toBe('Test Template');
-      expect(result.data?.category).toBeDefined();
-      expect(result.data?.size).toBeDefined();
+      expect(result.data?.template?.id).toBeDefined();
+      expect(result.data?.template?.name).toBe('Test Template');
+      expect(result.data?.template?.category).toBeDefined();
+      expect(result.data?.template?.size).toBeDefined();
     });
   });
 

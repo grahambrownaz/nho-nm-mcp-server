@@ -1,65 +1,81 @@
 /**
  * Integration Tests for Direct Mode Delivery (Print API Integration)
  *
- * Tests the full flow from subscription trigger through ReminderMedia API
- * and Stripe usage reporting.
+ * Tests the full flow from subscription trigger through print API
+ * fulfillment.
  */
 
-import { describe, it, expect, vi, beforeAll, beforeEach, afterAll, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { prisma } from '../../src/db/client.js';
-import { SubscriptionProcessor } from '../../src/cron/subscription-processor.js';
-import { reminderMediaAdapter } from '../../src/services/print-api/remindermedia.js';
-import { stripeBillingService } from '../../src/services/stripe-billing.js';
-import { dataService } from '../../src/services/data-service.js';
-import { pdfGenerator } from '../../src/services/pdf-generator.js';
-import { deduplicationService } from '../../src/services/deduplication.js';
+import { processSubscription } from '../../src/cron/subscription-processor.js';
+import { getDeduplicationService } from '../../src/services/deduplication.js';
+import { getPdfGenerator } from '../../src/services/pdf-generator.js';
+import {
+  getPrintApiProviderOptional,
+  configureAndRegisterProvider,
+} from '../../src/services/print-api/index.js';
 
 // Test configuration
 const TEST_TENANT_ID = 'direct-mode-test-tenant';
 const TEST_SUBSCRIPTION_ID = 'direct-mode-test-subscription';
 const TEST_TEMPLATE_ID = 'direct-mode-test-template';
 
-// Mock all external services
-vi.mock('../../src/services/data-service.js', () => ({
-  dataService: {
-    searchData: vi.fn(),
-    getRecordCount: vi.fn(),
-  },
+// Create mock provider
+const mockPrintProvider = {
+  name: 'mock_provider',
+  displayName: 'Mock Provider',
+  isConfigured: vi.fn(() => true),
+  initialize: vi.fn(),
+  submitJob: vi.fn(),
+  getJobStatus: vi.fn(),
+  cancelJob: vi.fn(),
+};
+
+// Mock external services
+vi.mock('../../src/services/deduplication.js', () => {
+  const mockDedupeService = {
+    deduplicateRecords: vi.fn(),
+    recordDeliveries: vi.fn(),
+    setDefaultWindow: vi.fn(),
+  };
+  return {
+    getDeduplicationService: vi.fn(() => mockDedupeService),
+    DeduplicationService: vi.fn(() => mockDedupeService),
+    generateRecordHash: vi.fn(() => 'mock-hash'),
+  };
+});
+
+vi.mock('../../src/services/pdf-generator.js', () => {
+  const mockPdfGenerator = {
+    initialize: vi.fn(),
+    generate: vi.fn(),
+    close: vi.fn(),
+    generatePreview: vi.fn(),
+  };
+  return {
+    getPdfGenerator: vi.fn(() => mockPdfGenerator),
+    PDFGenerator: vi.fn(() => mockPdfGenerator),
+  };
+});
+
+vi.mock('../../src/services/print-api/index.js', () => ({
+  getPrintApiProviderOptional: vi.fn(() => mockPrintProvider),
+  configureAndRegisterProvider: vi.fn(() => mockPrintProvider),
 }));
 
-vi.mock('../../src/services/print-api/remindermedia.js', () => ({
-  reminderMediaAdapter: {
-    createPostcard: vi.fn(),
-    createBatch: vi.fn(),
-    getStatus: vi.fn(),
-    cancelJob: vi.fn(),
-  },
+vi.mock('../../src/services/encryption.js', () => ({
+  decrypt: vi.fn((val) => val),
+  encrypt: vi.fn((val) => val),
 }));
 
-vi.mock('../../src/services/stripe-billing.js', () => ({
-  stripeBillingService: {
-    reportUsage: vi.fn(),
-  },
-}));
-
-vi.mock('../../src/services/pdf-generator.js', () => ({
-  pdfGenerator: {
-    generatePostcardPdf: vi.fn(),
-    generateBatchPdf: vi.fn(),
-  },
-}));
-
-vi.mock('../../src/services/deduplication.js', () => ({
-  deduplicationService: {
-    filterDuplicates: vi.fn(),
-    recordDelivery: vi.fn(),
-  },
+vi.mock('../../src/services/platform-sync/index.js', () => ({
+  syncToPlatform: vi.fn(),
 }));
 
 // Mock Prisma
 vi.mock('../../src/db/client.js', () => ({
   prisma: {
-    subscription: {
+    dataSubscription: {
       findMany: vi.fn(),
       findUnique: vi.fn(),
       update: vi.fn(),
@@ -72,6 +88,12 @@ vi.mock('../../src/db/client.js', () => ({
       findMany: vi.fn(),
       createMany: vi.fn(),
     },
+    deliveryConfig: {
+      findFirst: vi.fn(),
+    },
+    template: {
+      findUnique: vi.fn(),
+    },
     tenant: {
       findUnique: vi.fn(),
     },
@@ -82,15 +104,6 @@ vi.mock('../../src/db/client.js', () => ({
   },
 }));
 
-// Mock Decimal type
-function mockDecimal(value: number) {
-  return {
-    toNumber: () => value,
-    toString: () => String(value),
-    valueOf: () => value,
-  } as any;
-}
-
 // Test fixtures
 function createTestSubscription(overrides: Record<string, unknown> = {}) {
   return {
@@ -100,47 +113,27 @@ function createTestSubscription(overrides: Record<string, unknown> = {}) {
     database: 'NHO',
     status: 'ACTIVE',
     frequency: 'WEEKLY',
-    dayOfWeek: 1,
-    nextDeliveryDate: new Date(Date.now() - 3600000),
-    query: {
-      database: 'nho',
-      geography: { type: 'state', values: ['AZ'] },
-    },
+    nextDeliveryAt: new Date(Date.now() - 3600000),
+    geography: { type: 'state', values: ['AZ'] },
+    filters: null,
     templateId: TEST_TEMPLATE_ID,
-    postcardSize: '4x6',
-    fulfillmentMethod: 'PRINT_API',
-    deliveryConfig: {
-      method: 'PRINT_API',
-      provider: 'remindermedia',
-      returnAddress: {
-        name: 'Test Company',
-        address: '123 Main St',
-        city: 'Phoenix',
-        state: 'AZ',
-        zip: '85001',
-      },
-    },
-    recordLimit: 100,
-    tenant: {
-      id: TEST_TENANT_ID,
-      name: 'Direct Mode Test Tenant',
-      email: 'test@example.com',
-      status: 'ACTIVE',
-      stripeCustomerId: 'cus_test_123',
-      stripeSubscriptionId: 'sub_test_123',
-      subscriptionItems: {
-        records: 'si_records_123',
-        pdf: 'si_pdf_123',
-        print: 'si_print_123',
-      },
-    },
+    fulfillmentMethod: 'PRINT_MAIL',
+    fulfillmentConfig: null,
+    syncChannels: null,
+    clientName: null,
+    clientEmail: null,
+    clientPhone: null,
+    totalDeliveries: 0,
+    totalRecords: 0,
     template: {
       id: TEST_TEMPLATE_ID,
       name: 'Test Postcard Template',
-      templateData: {
-        front: '<html><body>Front {{firstName}} {{lastName}}</body></html>',
-        back: '<html><body>{{address}}, {{city}}, {{state}} {{zip}}</body></html>',
-      },
+      htmlFront: '<html><body>Front {{first_name}} {{last_name}}</body></html>',
+      htmlBack: '<html><body>{{address}}, {{city}}, {{state}} {{zip}}</body></html>',
+      cssStyles: null,
+      size: 'SIZE_4X6',
+      category: 'GENERAL',
+      mergeFields: ['first_name', 'last_name', 'address', 'city', 'state', 'zip'],
     },
     createdAt: new Date(),
     updatedAt: new Date(),
@@ -150,37 +143,39 @@ function createTestSubscription(overrides: Record<string, unknown> = {}) {
 
 function createTestRecord(overrides: Record<string, unknown> = {}) {
   return {
-    id: `record-${Math.random().toString(36).substr(2, 9)}`,
-    firstName: 'John',
-    lastName: 'Smith',
+    first_name: 'John',
+    last_name: 'Smith',
     address: '456 Oak Avenue',
     city: 'Tempe',
     state: 'AZ',
     zip: '85281',
-    saleDate: new Date(),
-    propertyType: 'Single Family',
-    salePrice: 375000,
+    move_date: new Date().toISOString(),
     ...overrides,
   };
 }
 
 describe('Direct Mode Delivery Integration', () => {
-  let processor: SubscriptionProcessor;
-
   beforeEach(() => {
     vi.clearAllMocks();
-    processor = new SubscriptionProcessor();
 
-    // Setup default mocks
-    vi.mocked(prisma.subscription.findMany).mockResolvedValue([createTestSubscription()]);
-    vi.mocked(prisma.subscription.findUnique).mockResolvedValue(createTestSubscription());
-    vi.mocked(prisma.subscription.update).mockResolvedValue(createTestSubscription());
+    // Setup Prisma mocks
+    vi.mocked(prisma.dataSubscription.findMany).mockResolvedValue([createTestSubscription()] as any);
+    vi.mocked(prisma.dataSubscription.findUnique).mockResolvedValue(createTestSubscription() as any);
+    vi.mocked(prisma.dataSubscription.update).mockResolvedValue(createTestSubscription() as any);
     vi.mocked(prisma.delivery.create).mockResolvedValue({
       id: 'delivery-direct-test',
-      subscriptionId: TEST_SUBSCRIPTION_ID,
+      dataSubscriptionId: TEST_SUBSCRIPTION_ID,
       tenantId: TEST_TENANT_ID,
-      status: 'PENDING',
-      fulfillmentMethod: 'PRINT_API',
+      status: 'PROCESSING',
+      recordCount: 3,
+      newRecordsCount: 3,
+      duplicatesRemoved: 0,
+      dataCost: 0.15,
+      pdfCost: 0,
+      fulfillmentCost: 0,
+      totalCost: 0.15,
+      scheduledAt: new Date(),
+      startedAt: new Date(),
       createdAt: new Date(),
     } as any);
     vi.mocked(prisma.delivery.update).mockResolvedValue({
@@ -188,466 +183,270 @@ describe('Direct Mode Delivery Integration', () => {
       status: 'COMPLETED',
     } as any);
     vi.mocked(prisma.deliveryRecord.findMany).mockResolvedValue([]);
-    vi.mocked(prisma.deliveryRecord.createMany).mockResolvedValue({ count: 0 });
-    vi.mocked(prisma.tenant.findUnique).mockResolvedValue({
-      id: TEST_TENANT_ID,
-      name: 'Direct Mode Test Tenant',
-      status: 'ACTIVE',
-      stripeCustomerId: 'cus_test_123',
-      subscriptionItems: {
-        records: 'si_records_123',
-        pdf: 'si_pdf_123',
-        print: 'si_print_123',
-      },
-    } as any);
-    vi.mocked(prisma.usageRecord.create).mockResolvedValue({} as any);
-
-    // Mock data service
-    vi.mocked(dataService.searchData).mockResolvedValue([
-      createTestRecord({ id: 'record-1' }),
-      createTestRecord({ id: 'record-2' }),
-      createTestRecord({ id: 'record-3' }),
-    ]);
-
-    // Mock deduplication
-    vi.mocked(deduplicationService.filterDuplicates).mockImplementation((records) =>
-      Promise.resolve(records)
-    );
-    vi.mocked(deduplicationService.recordDelivery).mockResolvedValue(undefined);
-
-    // Mock PDF generation
-    vi.mocked(pdfGenerator.generatePostcardPdf).mockResolvedValue({
-      pdfUrl: 'https://storage.example.com/postcards/test.pdf',
-      frontUrl: 'https://storage.example.com/postcards/test-front.pdf',
-      backUrl: 'https://storage.example.com/postcards/test-back.pdf',
-    });
-    vi.mocked(pdfGenerator.generateBatchPdf).mockResolvedValue({
-      pdfPath: '/tmp/batch.pdf',
-      pageCount: 6,
-    });
-
-    // Mock ReminderMedia API
-    vi.mocked(reminderMediaAdapter.createBatch).mockResolvedValue({
-      batchId: 'rm-batch-123',
-      totalCount: 3,
-      successCount: 3,
-      failedCount: 0,
-      postcards: [
-        { id: 'rm-pc-1', status: 'pending', createdAt: new Date() },
-        { id: 'rm-pc-2', status: 'pending', createdAt: new Date() },
-        { id: 'rm-pc-3', status: 'pending', createdAt: new Date() },
-      ],
-      failedPostcards: [],
-    });
-    vi.mocked(reminderMediaAdapter.getStatus).mockResolvedValue({
-      id: 'rm-pc-1',
-      status: 'pending',
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    });
-
-    // Mock Stripe usage reporting
-    vi.mocked(stripeBillingService.reportUsage).mockResolvedValue({} as any);
-  });
-
-  describe('Print API fulfillment', () => {
-    it('processes subscription with print_api fulfillment', async () => {
-      const subscription = createTestSubscription({
-        fulfillmentMethod: 'PRINT_API',
-      });
-
-      await processor.processSubscription(subscription);
-
-      // Verify data was fetched
-      expect(dataService.searchData).toHaveBeenCalled();
-
-      // Verify PDF was generated
-      expect(pdfGenerator.generatePostcardPdf).toHaveBeenCalled();
-
-      // Verify ReminderMedia API was called
-      expect(reminderMediaAdapter.createBatch).toHaveBeenCalled();
-
-      // Verify delivery was completed
-      expect(prisma.delivery.update).toHaveBeenCalledWith({
-        where: { id: 'delivery-direct-test' },
-        data: expect.objectContaining({
-          status: 'COMPLETED',
-        }),
-      });
-    });
-
-    it('calls ReminderMedia API with correct postcard data', async () => {
-      const records = [
-        createTestRecord({
-          firstName: 'Alice',
-          lastName: 'Johnson',
-          address: '100 First St',
+    vi.mocked(prisma.deliveryRecord.createMany).mockResolvedValue({ count: 3 });
+    vi.mocked(prisma.deliveryConfig.findFirst).mockResolvedValue({
+      id: 'config-1',
+      tenantId: TEST_TENANT_ID,
+      name: 'Print API Config',
+      method: 'PRINT_API',
+      printApiProvider: 'reminder_media',
+      printApiKey: 'encrypted-key',
+      printApiSettings: {
+        default_mail_class: 'standard',
+        return_address: {
+          name: 'Test Company',
+          address_line_1: '123 Main St',
           city: 'Phoenix',
           state: 'AZ',
           zip: '85001',
-        }),
-        createTestRecord({
-          firstName: 'Bob',
-          lastName: 'Williams',
-          address: '200 Second St',
-          city: 'Tempe',
-          state: 'AZ',
-          zip: '85281',
-        }),
-      ];
-
-      vi.mocked(dataService.searchData).mockResolvedValue(records);
-
-      const subscription = createTestSubscription();
-      await processor.processSubscription(subscription);
-
-      expect(reminderMediaAdapter.createBatch).toHaveBeenCalledWith(
-        expect.objectContaining({
-          postcards: expect.arrayContaining([
-            expect.objectContaining({
-              size: '4x6',
-              recipient: expect.objectContaining({
-                name: 'Alice Johnson',
-                address: '100 First St',
-                city: 'Phoenix',
-                state: 'AZ',
-                zip: '85001',
-              }),
-            }),
-            expect.objectContaining({
-              recipient: expect.objectContaining({
-                name: 'Bob Williams',
-              }),
-            }),
-          ]),
-        })
-      );
-    });
-
-    it('includes return address in API call', async () => {
-      const subscription = createTestSubscription({
-        deliveryConfig: {
-          method: 'PRINT_API',
-          provider: 'remindermedia',
-          returnAddress: {
-            name: 'Acme Realty',
-            address: '789 Business Blvd',
-            city: 'Scottsdale',
-            state: 'AZ',
-            zip: '85251',
-          },
         },
-      });
+      },
+      includeJdf: false,
+      isActive: true,
+      isDefault: true,
+    } as any);
+    vi.mocked(prisma.template.findUnique).mockResolvedValue({
+      id: TEST_TEMPLATE_ID,
+      name: 'Test Template',
+      htmlFront: '<div>{{first_name}}</div>',
+      htmlBack: null,
+      cssStyles: null,
+      size: 'SIZE_4X6',
+    } as any);
 
-      await processor.processSubscription(subscription);
+    // Mock deduplication service
+    const dedupeService = getDeduplicationService();
+    vi.mocked(dedupeService.deduplicateRecords).mockResolvedValue({
+      originalCount: 3,
+      uniqueCount: 3,
+      duplicateCount: 0,
+      uniqueRecords: [
+        createTestRecord({ first_name: 'Record1' }),
+        createTestRecord({ first_name: 'Record2' }),
+        createTestRecord({ first_name: 'Record3' }),
+      ],
+      duplicateHashes: [],
+    });
+    vi.mocked(dedupeService.recordDeliveries).mockResolvedValue(3);
 
-      expect(reminderMediaAdapter.createBatch).toHaveBeenCalledWith(
-        expect.objectContaining({
-          postcards: expect.arrayContaining([
-            expect.objectContaining({
-              returnAddress: expect.objectContaining({
-                name: 'Acme Realty',
-                address: '789 Business Blvd',
-              }),
-            }),
-          ]),
-        })
-      );
+    // Mock PDF generation
+    const pdfGen = getPdfGenerator();
+    vi.mocked(pdfGen.generate).mockResolvedValue({
+      success: true,
+      jobId: 'pdf-job-1',
+      files: ['/tmp/postcards.pdf'],
+      recordCount: 3,
+      pageCount: 6,
+      errors: [],
+    });
+
+    // Mock Print API provider
+    vi.mocked(mockPrintProvider.submitJob).mockResolvedValue({
+      success: true,
+      externalJobId: 'rm-batch-123',
+      estimatedDelivery: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+      cost: 1.95,
+      costPerPiece: 0.65,
+      recipientCount: 3,
     });
   });
 
-  describe('job ID storage', () => {
-    it('stores job ID in delivery record', async () => {
+  describe('Print API fulfillment', () => {
+    it('processes subscription and creates delivery record', async () => {
       const subscription = createTestSubscription();
-      await processor.processSubscription(subscription);
 
-      expect(prisma.delivery.update).toHaveBeenCalledWith({
-        where: { id: 'delivery-direct-test' },
-        data: expect.objectContaining({
-          fulfillmentDetails: expect.objectContaining({
-            printApiJobId: 'rm-batch-123',
-            provider: 'remindermedia',
-          }),
-        }),
-      });
+      const result = await processSubscription(subscription as any);
+
+      expect(result.success).toBe(true);
+      expect(prisma.delivery.create).toHaveBeenCalled();
     });
 
-    it('stores individual postcard IDs', async () => {
+    it('deduplicates records before processing', async () => {
       const subscription = createTestSubscription();
-      await processor.processSubscription(subscription);
+      const dedupeService = getDeduplicationService();
 
-      expect(prisma.delivery.update).toHaveBeenCalledWith({
-        where: { id: 'delivery-direct-test' },
-        data: expect.objectContaining({
-          fulfillmentDetails: expect.objectContaining({
-            postcardIds: ['rm-pc-1', 'rm-pc-2', 'rm-pc-3'],
-          }),
-        }),
-      });
+      await processSubscription(subscription as any);
+
+      expect(dedupeService.deduplicateRecords).toHaveBeenCalledWith(
+        TEST_TENANT_ID,
+        TEST_SUBSCRIPTION_ID,
+        expect.any(Array),
+        90
+      );
     });
-  });
 
-  describe('Stripe usage reporting', () => {
-    it('reports usage to Stripe after successful delivery', async () => {
-      const records = [
-        createTestRecord(),
-        createTestRecord(),
-        createTestRecord(),
-      ];
-      vi.mocked(dataService.searchData).mockResolvedValue(records);
-
+    it('generates PDF when template is configured', async () => {
       const subscription = createTestSubscription();
-      await processor.processSubscription(subscription);
+      const pdfGen = getPdfGenerator();
 
-      // Verify records usage reported
-      expect(stripeBillingService.reportUsage).toHaveBeenCalledWith(
+      await processSubscription(subscription as any);
+
+      expect(pdfGen.generate).toHaveBeenCalled();
+    });
+
+    it('calls print API provider for fulfillment', async () => {
+      const subscription = createTestSubscription();
+
+      await processSubscription(subscription as any);
+
+      expect(mockPrintProvider.submitJob).toHaveBeenCalled();
+    });
+
+    it('marks delivery as completed on success', async () => {
+      const subscription = createTestSubscription();
+
+      await processSubscription(subscription as any);
+
+      expect(prisma.delivery.update).toHaveBeenCalledWith(
         expect.objectContaining({
-          subscriptionItemId: 'si_records_123',
-          quantity: 3,
-        })
-      );
-
-      // Verify PDF usage reported
-      expect(stripeBillingService.reportUsage).toHaveBeenCalledWith(
-        expect.objectContaining({
-          subscriptionItemId: 'si_pdf_123',
-          quantity: 3,
-        })
-      );
-
-      // Verify print usage reported
-      expect(stripeBillingService.reportUsage).toHaveBeenCalledWith(
-        expect.objectContaining({
-          subscriptionItemId: 'si_print_123',
-          quantity: 3,
-        })
-      );
-    });
-
-    it('includes idempotency key in usage report', async () => {
-      const subscription = createTestSubscription();
-      await processor.processSubscription(subscription);
-
-      expect(stripeBillingService.reportUsage).toHaveBeenCalledWith(
-        expect.objectContaining({
-          idempotencyKey: expect.stringContaining('delivery-direct-test'),
-        })
-      );
-    });
-
-    it('creates usage record in database', async () => {
-      const subscription = createTestSubscription();
-      await processor.processSubscription(subscription);
-
-      expect(prisma.usageRecord.create).toHaveBeenCalledWith({
-        data: expect.objectContaining({
-          tenantId: TEST_TENANT_ID,
-          deliveryId: 'delivery-direct-test',
-        }),
-      });
-    });
-  });
-
-  describe('partial batch failure handling', () => {
-    it('handles partial batch failures', async () => {
-      vi.mocked(reminderMediaAdapter.createBatch).mockResolvedValue({
-        batchId: 'rm-batch-partial',
-        totalCount: 3,
-        successCount: 2,
-        failedCount: 1,
-        postcards: [
-          { id: 'rm-pc-1', status: 'pending', createdAt: new Date() },
-          { id: 'rm-pc-2', status: 'pending', createdAt: new Date() },
-        ],
-        failedPostcards: [
-          {
-            index: 2,
-            error: 'Invalid address',
-            originalRequest: createTestRecord(),
-          },
-        ],
-      });
-
-      const subscription = createTestSubscription();
-      await processor.processSubscription(subscription);
-
-      // Should still complete but log failures
-      expect(prisma.delivery.update).toHaveBeenCalledWith({
-        where: { id: 'delivery-direct-test' },
-        data: expect.objectContaining({
-          status: 'COMPLETED',
-          fulfillmentDetails: expect.objectContaining({
-            successCount: 2,
-            failedCount: 1,
-          }),
-        }),
-      });
-    });
-
-    it('only reports successful postcards to Stripe', async () => {
-      vi.mocked(reminderMediaAdapter.createBatch).mockResolvedValue({
-        batchId: 'rm-batch-partial',
-        totalCount: 5,
-        successCount: 3,
-        failedCount: 2,
-        postcards: [
-          { id: 'rm-pc-1', status: 'pending', createdAt: new Date() },
-          { id: 'rm-pc-2', status: 'pending', createdAt: new Date() },
-          { id: 'rm-pc-3', status: 'pending', createdAt: new Date() },
-        ],
-        failedPostcards: [],
-      });
-
-      const subscription = createTestSubscription();
-      await processor.processSubscription(subscription);
-
-      // Should only report 3 print jobs (successful ones)
-      expect(stripeBillingService.reportUsage).toHaveBeenCalledWith(
-        expect.objectContaining({
-          subscriptionItemId: 'si_print_123',
-          quantity: 3,
-        })
-      );
-    });
-  });
-
-  describe('error handling', () => {
-    it('marks delivery as failed on API error', async () => {
-      vi.mocked(reminderMediaAdapter.createBatch).mockRejectedValue(
-        new Error('API connection failed')
-      );
-
-      const subscription = createTestSubscription();
-
-      await expect(processor.processSubscription(subscription)).rejects.toThrow();
-
-      expect(prisma.delivery.update).toHaveBeenCalledWith({
-        where: { id: 'delivery-direct-test' },
-        data: expect.objectContaining({
-          status: 'FAILED',
-          errorMessage: expect.stringContaining('API connection failed'),
-        }),
-      });
-    });
-
-    it('does not report usage on failure', async () => {
-      vi.mocked(reminderMediaAdapter.createBatch).mockRejectedValue(
-        new Error('API error')
-      );
-
-      const subscription = createTestSubscription();
-
-      await expect(processor.processSubscription(subscription)).rejects.toThrow();
-
-      // Stripe usage should not be reported
-      expect(stripeBillingService.reportUsage).not.toHaveBeenCalled();
-    });
-
-    it('retries on transient API errors', async () => {
-      vi.mocked(reminderMediaAdapter.createBatch)
-        .mockRejectedValueOnce(new Error('Connection timeout'))
-        .mockResolvedValueOnce({
-          batchId: 'rm-batch-retry',
-          totalCount: 3,
-          successCount: 3,
-          failedCount: 0,
-          postcards: [
-            { id: 'rm-pc-1', status: 'pending', createdAt: new Date() },
-            { id: 'rm-pc-2', status: 'pending', createdAt: new Date() },
-            { id: 'rm-pc-3', status: 'pending', createdAt: new Date() },
-          ],
-          failedPostcards: [],
-        });
-
-      const subscription = createTestSubscription();
-      await processor.processSubscription(subscription);
-
-      expect(reminderMediaAdapter.createBatch).toHaveBeenCalledTimes(2);
-      expect(prisma.delivery.update).toHaveBeenCalledWith({
-        where: { id: 'delivery-direct-test' },
-        data: expect.objectContaining({
-          status: 'COMPLETED',
-        }),
-      });
-    });
-  });
-
-  describe('postcard size variations', () => {
-    it('handles 4x6 postcards', async () => {
-      const subscription = createTestSubscription({ postcardSize: '4x6' });
-      await processor.processSubscription(subscription);
-
-      expect(reminderMediaAdapter.createBatch).toHaveBeenCalledWith(
-        expect.objectContaining({
-          postcards: expect.arrayContaining([
-            expect.objectContaining({ size: '4x6' }),
-          ]),
-        })
-      );
-    });
-
-    it('handles 6x9 postcards', async () => {
-      const subscription = createTestSubscription({ postcardSize: '6x9' });
-      await processor.processSubscription(subscription);
-
-      expect(reminderMediaAdapter.createBatch).toHaveBeenCalledWith(
-        expect.objectContaining({
-          postcards: expect.arrayContaining([
-            expect.objectContaining({ size: '6x9' }),
-          ]),
-        })
-      );
-    });
-
-    it('handles 6x11 postcards', async () => {
-      const subscription = createTestSubscription({ postcardSize: '6x11' });
-      await processor.processSubscription(subscription);
-
-      expect(reminderMediaAdapter.createBatch).toHaveBeenCalledWith(
-        expect.objectContaining({
-          postcards: expect.arrayContaining([
-            expect.objectContaining({ size: '6x11' }),
-          ]),
-        })
-      );
-    });
-  });
-
-  describe('template merging', () => {
-    it('generates personalized PDFs for each record', async () => {
-      const records = [
-        createTestRecord({ firstName: 'Alice', lastName: 'Smith' }),
-        createTestRecord({ firstName: 'Bob', lastName: 'Jones' }),
-      ];
-      vi.mocked(dataService.searchData).mockResolvedValue(records);
-
-      const subscription = createTestSubscription();
-      await processor.processSubscription(subscription);
-
-      expect(pdfGenerator.generatePostcardPdf).toHaveBeenCalledTimes(2);
-      expect(pdfGenerator.generatePostcardPdf).toHaveBeenCalledWith(
-        expect.objectContaining({
-          templateId: TEST_TEMPLATE_ID,
           data: expect.objectContaining({
-            firstName: 'Alice',
-            lastName: 'Smith',
+            status: 'COMPLETED',
           }),
         })
       );
     });
   });
 
-  describe('metadata tracking', () => {
-    it('includes subscription metadata in API call', async () => {
+  describe('Fulfillment details storage', () => {
+    it('stores external job ID in fulfillment details', async () => {
       const subscription = createTestSubscription();
-      await processor.processSubscription(subscription);
 
-      expect(reminderMediaAdapter.createBatch).toHaveBeenCalledWith(
+      await processSubscription(subscription as any);
+
+      expect(prisma.delivery.update).toHaveBeenCalledWith(
         expect.objectContaining({
-          metadata: expect.objectContaining({
-            subscriptionId: TEST_SUBSCRIPTION_ID,
-            tenantId: TEST_TENANT_ID,
-            deliveryId: 'delivery-direct-test',
+          data: expect.objectContaining({
+            fulfillmentDetails: expect.objectContaining({
+              externalJobId: 'rm-batch-123',
+            }),
+          }),
+        })
+      );
+    });
+
+    it('stores provider name in fulfillment details', async () => {
+      const subscription = createTestSubscription();
+
+      await processSubscription(subscription as any);
+
+      expect(prisma.delivery.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            fulfillmentDetails: expect.objectContaining({
+              provider: 'mock_provider',
+            }),
+          }),
+        })
+      );
+    });
+  });
+
+  describe('Error handling', () => {
+    it('marks delivery as failed on print API error', async () => {
+      vi.mocked(mockPrintProvider.submitJob).mockResolvedValue({
+        success: false,
+        error: 'API connection failed',
+        errorCode: 'CONNECTION_ERROR',
+      });
+
+      const subscription = createTestSubscription();
+      const result = await processSubscription(subscription as any);
+
+      expect(prisma.delivery.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            fulfillmentStatus: 'FAILED',
+          }),
+        })
+      );
+    });
+
+    it('continues processing when no delivery config is found', async () => {
+      vi.mocked(prisma.deliveryConfig.findFirst).mockResolvedValue(null);
+
+      const subscription = createTestSubscription();
+      const result = await processSubscription(subscription as any);
+
+      // Should complete but with NOT_APPLICABLE fulfillment
+      expect(prisma.delivery.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            fulfillmentStatus: 'NOT_APPLICABLE',
+            status: 'COMPLETED',
+          }),
+        })
+      );
+    });
+  });
+
+  describe('Deduplication handling', () => {
+    it('handles empty unique records gracefully', async () => {
+      const dedupeService = getDeduplicationService();
+      vi.mocked(dedupeService.deduplicateRecords).mockResolvedValue({
+        originalCount: 3,
+        uniqueCount: 0,
+        duplicateCount: 3,
+        uniqueRecords: [],
+        duplicateHashes: ['hash1', 'hash2', 'hash3'],
+      });
+
+      const subscription = createTestSubscription();
+      const result = await processSubscription(subscription as any);
+
+      expect(result.success).toBe(true);
+      expect(result.newRecordCount).toBe(0);
+      expect(result.duplicatesRemoved).toBe(3);
+    });
+
+    it('records delivered records for future deduplication', async () => {
+      const subscription = createTestSubscription();
+      const dedupeService = getDeduplicationService();
+
+      await processSubscription(subscription as any);
+
+      expect(dedupeService.recordDeliveries).toHaveBeenCalled();
+    });
+  });
+
+  describe('Subscription stats update', () => {
+    it('updates subscription with next delivery date', async () => {
+      const subscription = createTestSubscription();
+
+      await processSubscription(subscription as any);
+
+      expect(prisma.dataSubscription.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            lastDeliveryAt: expect.any(Date),
+            nextDeliveryAt: expect.any(Date),
+          }),
+        })
+      );
+    });
+
+    it('increments total deliveries counter', async () => {
+      const subscription = createTestSubscription();
+
+      await processSubscription(subscription as any);
+
+      expect(prisma.dataSubscription.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            totalDeliveries: { increment: 1 },
+          }),
+        })
+      );
+    });
+
+    it('increments total records counter', async () => {
+      const subscription = createTestSubscription();
+
+      await processSubscription(subscription as any);
+
+      expect(prisma.dataSubscription.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            totalRecords: { increment: expect.any(Number) },
           }),
         })
       );

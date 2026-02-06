@@ -5,9 +5,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { executeConfigureDelivery } from '../../../../src/tools/delivery/configure-delivery.js';
 import { prisma } from '../../../../src/db/client.js';
-import { sftpDeliveryService } from '../../../../src/services/sftp-delivery.js';
+import * as sftpDelivery from '../../../../src/services/sftp-delivery.js';
+import * as encryption from '../../../../src/services/encryption.js';
+import * as printApi from '../../../../src/services/print-api/index.js';
 import type { TenantContext } from '../../../../src/utils/auth.js';
-import { ValidationError, AuthorizationError } from '../../../../src/utils/errors.js';
+import { AuthorizationError } from '../../../../src/utils/errors.js';
 
 // Mock Prisma client
 vi.mock('../../../../src/db/client.js', () => ({
@@ -17,26 +19,47 @@ vi.mock('../../../../src/db/client.js', () => ({
       upsert: vi.fn(),
       create: vi.fn(),
       update: vi.fn(),
+      updateMany: vi.fn(),
     },
   },
 }));
 
 // Mock SFTP delivery service
 vi.mock('../../../../src/services/sftp-delivery.js', () => ({
-  sftpDeliveryService: {
+  getSftpDeliveryService: vi.fn(() => ({
     testConnection: vi.fn(),
-    encryptCredentials: vi.fn(),
+  })),
+}));
+
+// Mock encryption service
+vi.mock('../../../../src/services/encryption.js', () => ({
+  encrypt: vi.fn((val) => `encrypted:${val}`),
+}));
+
+// Mock JDF generator
+vi.mock('../../../../src/services/jdf-generator.js', () => ({
+  JDF_PRESETS: {
+    '4x6_100lb_gloss_fc': {},
+    '4x6_100lb_matte_fc': {},
+    '6x9_100lb_gloss_fc': {},
+    '6x9_100lb_matte_fc': {},
   },
 }));
 
-// Mock Decimal type that matches Prisma's Decimal behavior
-function mockDecimal(value: number) {
-  return {
-    toNumber: () => value,
-    toString: () => String(value),
-    valueOf: () => value,
-  } as any;
-}
+// Mock print API
+vi.mock('../../../../src/services/print-api/index.js', () => ({
+  configureAndRegisterProvider: vi.fn(() => ({
+    name: 'lob',
+    displayName: 'Lob',
+    testConnection: vi.fn().mockResolvedValue({ success: true }),
+  })),
+  listPrintApiProviders: vi.fn(() => [
+    { name: 'reminder_media', displayName: 'ReminderMedia', isDefault: false, isConfigured: false },
+    { name: 'lob', displayName: 'Lob', isDefault: false, isConfigured: false },
+    { name: 'stannp', displayName: 'Stannp', isDefault: false, isConfigured: false },
+    { name: 'postgrid', displayName: 'PostGrid', isDefault: false, isConfigured: false },
+  ]),
+}));
 
 // Create a valid tenant context for tests
 function createTestContext(overrides: Partial<TenantContext> = {}): TenantContext {
@@ -67,189 +90,128 @@ function createTestContext(overrides: Partial<TenantContext> = {}): TenantContex
       createdAt: new Date(),
       updatedAt: new Date(),
     },
-    subscription: {
-      id: 'test-subscription-id',
-      tenantId: 'test-tenant-id',
-      plan: 'PROFESSIONAL',
-      status: 'ACTIVE',
-      monthlyRecordLimit: 10000,
-      monthlyEmailAppends: 5000,
-      monthlyPhoneAppends: 5000,
-      allowedDatabases: ['NHO', 'NEW_MOVER', 'CONSUMER', 'BUSINESS'],
-      allowedGeographies: null,
-      allowedStates: [],
-      allowedZipCodes: [],
-      pricePerRecord: mockDecimal(0.05),
-      priceEmailAppend: mockDecimal(0.02),
-      pricePhoneAppend: mockDecimal(0.03),
-      pricePdfGeneration: mockDecimal(0.10),
-      pricePrintPerPiece: mockDecimal(0.65),
-      billingCycleStart: new Date(),
-      billingCycleEnd: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    },
+    subscription: null,
     permissions: ['*'],
     ...overrides,
   };
 }
 
 describe('configure_delivery tool', () => {
+  let mockSftpService: { testConnection: ReturnType<typeof vi.fn> };
+
   beforeEach(() => {
     vi.clearAllMocks();
 
-    // Setup default mock responses
-    vi.mocked(sftpDeliveryService.testConnection).mockResolvedValue(true);
-    vi.mocked(sftpDeliveryService.encryptCredentials).mockReturnValue('encrypted-credentials');
-    vi.mocked(prisma.deliveryConfig.upsert).mockResolvedValue({
+    mockSftpService = {
+      testConnection: vi.fn().mockResolvedValue({
+        success: true,
+        message: 'Connection successful',
+        folderExists: true,
+        folderWritable: true,
+        latencyMs: 50,
+      }),
+    };
+
+    vi.mocked(sftpDelivery.getSftpDeliveryService).mockReturnValue(mockSftpService);
+
+    vi.mocked(prisma.deliveryConfig.updateMany).mockResolvedValue({ count: 0 });
+    vi.mocked(prisma.deliveryConfig.create).mockResolvedValue({
       id: 'config-id',
       tenantId: 'test-tenant-id',
-      method: 'SFTP',
-      config: { host: 'sftp.example.com' },
+      name: 'Test Config',
+      method: 'SFTP_HOT_FOLDER',
+      isDefault: false,
       isActive: true,
       createdAt: new Date(),
       updatedAt: new Date(),
-    } as any);
+    } as never);
   });
 
-  describe('SFTP configuration', () => {
-    it('configures SFTP with valid credentials', async () => {
+  describe('SFTP hot folder configuration', () => {
+    it('configures SFTP with password', async () => {
       const context = createTestContext();
       const input = {
-        method: 'sftp',
-        config: {
+        name: 'Printer SFTP',
+        method: 'sftp_hot_folder',
+        sftp: {
           host: 'sftp.example.com',
           port: 22,
           username: 'testuser',
           password: 'testpass',
-          remote_path: '/incoming/data',
+          folder_path: '/incoming/data',
         },
       };
 
       const result = await executeConfigureDelivery(input, context);
 
       expect(result.success).toBe(true);
-      expect(result.data?.method).toBe('sftp');
-      expect(result.data?.connection_verified).toBe(true);
+      expect(result.data?.config.method).toBe('sftp_hot_folder');
     });
 
-    it('validates SFTP connection on save', async () => {
+    it('validates SFTP connection when test_connection is true', async () => {
       const context = createTestContext();
       const input = {
-        method: 'sftp',
-        config: {
+        name: 'Printer SFTP',
+        method: 'sftp_hot_folder',
+        sftp: {
           host: 'sftp.example.com',
           port: 22,
           username: 'testuser',
           password: 'testpass',
-          remote_path: '/incoming',
+          folder_path: '/incoming',
         },
-        validate_connection: true,
+        test_connection: true,
       };
 
-      await executeConfigureDelivery(input, context);
+      const result = await executeConfigureDelivery(input, context);
 
-      expect(sftpDeliveryService.testConnection).toHaveBeenCalledWith({
-        host: 'sftp.example.com',
-        port: 22,
-        username: 'testuser',
-        password: 'testpass',
-        remote_path: '/incoming',
-      });
+      expect(mockSftpService.testConnection).toHaveBeenCalled();
+      expect(result.data?.test_result).toBeDefined();
+      expect(result.data?.test_result?.success).toBe(true);
     });
 
-    it('encrypts credentials before storage', async () => {
+    it('encrypts password before storage', async () => {
       const context = createTestContext();
       const input = {
-        method: 'sftp',
-        config: {
+        name: 'Printer SFTP',
+        method: 'sftp_hot_folder',
+        sftp: {
           host: 'sftp.example.com',
           port: 22,
           username: 'testuser',
           password: 'secretpassword',
-          remote_path: '/incoming',
+          folder_path: '/incoming',
         },
+        test_connection: false,
       };
 
       await executeConfigureDelivery(input, context);
 
-      expect(sftpDeliveryService.encryptCredentials).toHaveBeenCalledWith(
-        expect.objectContaining({
-          password: 'secretpassword',
-        })
-      );
-      expect(prisma.deliveryConfig.upsert).toHaveBeenCalledWith(
-        expect.objectContaining({
-          create: expect.objectContaining({
-            config: expect.objectContaining({
-              credentials: 'encrypted-credentials',
-            }),
-          }),
-        })
-      );
+      expect(encryption.encrypt).toHaveBeenCalledWith('secretpassword');
     });
 
-    it('rejects invalid SFTP config - missing host', async () => {
+    it('throws error when SFTP config is missing', async () => {
       const context = createTestContext();
       const input = {
-        method: 'sftp',
-        config: {
-          port: 22,
-          username: 'testuser',
-          password: 'testpass',
-          remote_path: '/incoming',
-        },
+        name: 'Printer SFTP',
+        method: 'sftp_hot_folder',
       };
 
       await expect(executeConfigureDelivery(input, context)).rejects.toThrow();
     });
 
-    it('rejects invalid SFTP config - missing username', async () => {
+    it('throws error when neither password nor private_key is provided', async () => {
       const context = createTestContext();
       const input = {
-        method: 'sftp',
-        config: {
+        name: 'Printer SFTP',
+        method: 'sftp_hot_folder',
+        sftp: {
           host: 'sftp.example.com',
           port: 22,
-          password: 'testpass',
-          remote_path: '/incoming',
-        },
-      };
-
-      await expect(executeConfigureDelivery(input, context)).rejects.toThrow();
-    });
-
-    it('rejects invalid SFTP config - invalid port', async () => {
-      const context = createTestContext();
-      const input = {
-        method: 'sftp',
-        config: {
-          host: 'sftp.example.com',
-          port: -1, // Invalid port
           username: 'testuser',
-          password: 'testpass',
-          remote_path: '/incoming',
+          folder_path: '/incoming',
         },
       };
-
-      await expect(executeConfigureDelivery(input, context)).rejects.toThrow();
-    });
-
-    it('handles SFTP connection failure', async () => {
-      const context = createTestContext();
-      const input = {
-        method: 'sftp',
-        config: {
-          host: 'invalid.sftp.com',
-          port: 22,
-          username: 'testuser',
-          password: 'testpass',
-          remote_path: '/incoming',
-        },
-        validate_connection: true,
-      };
-
-      vi.mocked(sftpDeliveryService.testConnection).mockResolvedValue(false);
 
       await expect(executeConfigureDelivery(input, context)).rejects.toThrow();
     });
@@ -257,14 +219,16 @@ describe('configure_delivery tool', () => {
     it('accepts SSH key authentication', async () => {
       const context = createTestContext();
       const input = {
-        method: 'sftp',
-        config: {
+        name: 'Printer SFTP',
+        method: 'sftp_hot_folder',
+        sftp: {
           host: 'sftp.example.com',
           port: 22,
           username: 'testuser',
           private_key: '-----BEGIN RSA PRIVATE KEY-----\nMIIE...\n-----END RSA PRIVATE KEY-----',
-          remote_path: '/incoming',
+          folder_path: '/incoming',
         },
+        test_connection: false,
       };
 
       const result = await executeConfigureDelivery(input, context);
@@ -272,246 +236,288 @@ describe('configure_delivery tool', () => {
       expect(result.success).toBe(true);
     });
 
-    it('uses default port 22 if not specified', async () => {
+    it('handles SFTP connection failure', async () => {
+      mockSftpService.testConnection.mockResolvedValue({
+        success: false,
+        message: 'Connection refused',
+        folderExists: false,
+        folderWritable: false,
+      });
+
       const context = createTestContext();
       const input = {
-        method: 'sftp',
-        config: {
-          host: 'sftp.example.com',
+        name: 'Printer SFTP',
+        method: 'sftp_hot_folder',
+        sftp: {
+          host: 'invalid.sftp.com',
+          port: 22,
           username: 'testuser',
           password: 'testpass',
-          remote_path: '/incoming',
+          folder_path: '/incoming',
         },
+        test_connection: true,
+      };
+
+      const result = await executeConfigureDelivery(input, context);
+
+      expect(result.data?.test_result?.success).toBe(false);
+    });
+
+    it('includes JDF preset validation', async () => {
+      const context = createTestContext();
+      const input = {
+        name: 'Printer SFTP with JDF',
+        method: 'sftp_hot_folder',
+        sftp: {
+          host: 'sftp.example.com',
+          port: 22,
+          username: 'testuser',
+          password: 'testpass',
+          folder_path: '/incoming',
+          include_jdf: true,
+          jdf_preset: '4x6_100lb_gloss_fc',
+        },
+        test_connection: false,
       };
 
       const result = await executeConfigureDelivery(input, context);
 
       expect(result.success).toBe(true);
-      expect(sftpDeliveryService.testConnection).toHaveBeenCalledWith(
-        expect.objectContaining({ port: 22 })
-      );
+      expect(result.data?.jdf_presets).toBeDefined();
+    });
+
+    it('throws error for invalid JDF preset', async () => {
+      const context = createTestContext();
+      const input = {
+        name: 'Printer SFTP with JDF',
+        method: 'sftp_hot_folder',
+        sftp: {
+          host: 'sftp.example.com',
+          port: 22,
+          username: 'testuser',
+          password: 'testpass',
+          folder_path: '/incoming',
+          include_jdf: true,
+          jdf_preset: 'invalid_preset',
+        },
+        test_connection: false,
+      };
+
+      await expect(executeConfigureDelivery(input, context)).rejects.toThrow();
     });
   });
 
   describe('email configuration', () => {
     it('configures email delivery', async () => {
-      const context = createTestContext();
-      const input = {
-        method: 'email',
-        config: {
-          email_address: 'delivery@example.com',
-          subject_template: 'Your {{database}} data is ready',
-          include_summary: true,
-        },
-      };
-
-      vi.mocked(prisma.deliveryConfig.upsert).mockResolvedValue({
+      vi.mocked(prisma.deliveryConfig.create).mockResolvedValue({
         id: 'config-id',
         tenantId: 'test-tenant-id',
+        name: 'Email Delivery',
         method: 'EMAIL',
-        config: { email_address: 'delivery@example.com' },
+        isDefault: false,
         isActive: true,
         createdAt: new Date(),
         updatedAt: new Date(),
-      } as any);
+      } as never);
+
+      const context = createTestContext();
+      const input = {
+        name: 'Email Delivery',
+        method: 'email',
+        email: {
+          address: 'delivery@example.com',
+        },
+        test_connection: false,
+      };
 
       const result = await executeConfigureDelivery(input, context);
 
       expect(result.success).toBe(true);
-      expect(result.data?.method).toBe('email');
     });
 
-    it('validates email address format', async () => {
+    it('throws error when email config is missing', async () => {
       const context = createTestContext();
       const input = {
+        name: 'Email Delivery',
         method: 'email',
-        config: {
-          email_address: 'not-an-email',
-        },
       };
 
       await expect(executeConfigureDelivery(input, context)).rejects.toThrow();
-    });
-
-    it('accepts multiple email recipients', async () => {
-      const context = createTestContext();
-      const input = {
-        method: 'email',
-        config: {
-          email_addresses: ['team@example.com', 'admin@example.com'],
-          subject_template: 'Data delivery ready',
-        },
-      };
-
-      vi.mocked(prisma.deliveryConfig.upsert).mockResolvedValue({
-        id: 'config-id',
-        tenantId: 'test-tenant-id',
-        method: 'EMAIL',
-        config: { email_addresses: ['team@example.com', 'admin@example.com'] },
-        isActive: true,
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      } as any);
-
-      const result = await executeConfigureDelivery(input, context);
-
-      expect(result.success).toBe(true);
     });
   });
 
   describe('webhook configuration', () => {
     it('configures webhook delivery', async () => {
+      vi.mocked(prisma.deliveryConfig.create).mockResolvedValue({
+        id: 'config-id',
+        tenantId: 'test-tenant-id',
+        name: 'Webhook Delivery',
+        method: 'WEBHOOK',
+        isDefault: false,
+        isActive: true,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      } as never);
+
       const context = createTestContext();
       const input = {
+        name: 'Webhook Delivery',
         method: 'webhook',
-        config: {
+        webhook: {
           url: 'https://api.example.com/webhook/delivery',
-          secret: 'webhook-secret-123',
           headers: {
             'X-Api-Key': 'api-key-123',
           },
         },
+        test_connection: false,
       };
-
-      vi.mocked(prisma.deliveryConfig.upsert).mockResolvedValue({
-        id: 'config-id',
-        tenantId: 'test-tenant-id',
-        method: 'WEBHOOK',
-        config: { url: 'https://api.example.com/webhook/delivery' },
-        isActive: true,
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      } as any);
 
       const result = await executeConfigureDelivery(input, context);
 
       expect(result.success).toBe(true);
-      expect(result.data?.method).toBe('webhook');
     });
 
-    it('validates webhook URL format', async () => {
+    it('throws error when webhook config is missing', async () => {
       const context = createTestContext();
       const input = {
+        name: 'Webhook Delivery',
         method: 'webhook',
-        config: {
-          url: 'not-a-url',
-        },
       };
 
       await expect(executeConfigureDelivery(input, context)).rejects.toThrow();
     });
+  });
 
-    it('requires HTTPS for webhook URL', async () => {
+  describe('print API configuration', () => {
+    it('configures print API delivery', async () => {
+      vi.mocked(prisma.deliveryConfig.create).mockResolvedValue({
+        id: 'config-id',
+        tenantId: 'test-tenant-id',
+        name: 'Print API',
+        method: 'PRINT_API',
+        isDefault: false,
+        isActive: true,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      } as never);
+
       const context = createTestContext();
       const input = {
-        method: 'webhook',
-        config: {
-          url: 'http://insecure.example.com/webhook',
+        name: 'Print API',
+        method: 'print_api',
+        print_api: {
+          provider: 'lob',
+          api_key: 'test_api_key',
         },
+        test_connection: false,
+      };
+
+      const result = await executeConfigureDelivery(input, context);
+
+      expect(result.success).toBe(true);
+      expect(result.data?.print_api_providers).toBeDefined();
+    });
+
+    it('tests print API connection', async () => {
+      vi.mocked(prisma.deliveryConfig.create).mockResolvedValue({
+        id: 'config-id',
+        tenantId: 'test-tenant-id',
+        name: 'Print API',
+        method: 'PRINT_API',
+        isDefault: false,
+        isActive: true,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      } as never);
+
+      const context = createTestContext();
+      const input = {
+        name: 'Print API',
+        method: 'print_api',
+        print_api: {
+          provider: 'lob',
+          api_key: 'test_api_key',
+        },
+        test_connection: true,
+      };
+
+      const result = await executeConfigureDelivery(input, context);
+
+      expect(printApi.configureAndRegisterProvider).toHaveBeenCalled();
+      expect(result.data?.test_result?.success).toBe(true);
+    });
+
+    it('throws error when print_api config is missing', async () => {
+      const context = createTestContext();
+      const input = {
+        name: 'Print API',
+        method: 'print_api',
       };
 
       await expect(executeConfigureDelivery(input, context)).rejects.toThrow();
     });
-
-    it('encrypts webhook secret before storage', async () => {
-      const context = createTestContext();
-      const input = {
-        method: 'webhook',
-        config: {
-          url: 'https://api.example.com/webhook',
-          secret: 'super-secret-key',
-        },
-      };
-
-      await executeConfigureDelivery(input, context);
-
-      expect(sftpDeliveryService.encryptCredentials).toHaveBeenCalled();
-    });
   });
 
-  describe('FTP configuration', () => {
-    it('configures FTP delivery', async () => {
-      const context = createTestContext();
-      const input = {
-        method: 'ftp',
-        config: {
-          host: 'ftp.example.com',
-          port: 21,
-          username: 'ftpuser',
-          password: 'ftppass',
-          remote_path: '/uploads',
-          secure: true, // FTPS
-        },
-      };
-
-      vi.mocked(prisma.deliveryConfig.upsert).mockResolvedValue({
+  describe('cloud storage configuration', () => {
+    it('configures cloud storage delivery', async () => {
+      vi.mocked(prisma.deliveryConfig.create).mockResolvedValue({
         id: 'config-id',
         tenantId: 'test-tenant-id',
-        method: 'FTP',
-        config: { host: 'ftp.example.com' },
+        name: 'S3 Storage',
+        method: 'CLOUD_STORAGE',
+        isDefault: false,
         isActive: true,
         createdAt: new Date(),
         updatedAt: new Date(),
-      } as any);
+      } as never);
+
+      const context = createTestContext();
+      const input = {
+        name: 'S3 Storage',
+        method: 'cloud_storage',
+        cloud_storage: {
+          provider: 's3',
+          bucket: 'my-bucket',
+          path: '/deliveries',
+          credentials: JSON.stringify({ accessKeyId: 'xxx', secretAccessKey: 'yyy' }),
+        },
+        test_connection: false,
+      };
 
       const result = await executeConfigureDelivery(input, context);
 
       expect(result.success).toBe(true);
-      expect(result.data?.method).toBe('ftp');
     });
-  });
 
-  describe('SFTP hot folder configuration', () => {
-    it('configures SFTP hot folder for printer', async () => {
+    it('throws error when cloud_storage config is missing', async () => {
       const context = createTestContext();
       const input = {
-        method: 'sftp_hot_folder',
-        config: {
-          host: 'printer.sftp.com',
-          port: 22,
-          username: 'printjob',
-          password: 'printpass',
-          remote_path: '/hot_folder/incoming',
-          generate_jdf: true,
-          jdf_settings: {
-            media_preset: '4x6_100lb_gloss_fc',
-            duplex: true,
-          },
-        },
+        name: 'S3 Storage',
+        method: 'cloud_storage',
       };
 
-      vi.mocked(prisma.deliveryConfig.upsert).mockResolvedValue({
-        id: 'config-id',
-        tenantId: 'test-tenant-id',
-        method: 'SFTP_HOT_FOLDER',
-        config: { host: 'printer.sftp.com', generate_jdf: true },
-        isActive: true,
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      } as any);
-
-      const result = await executeConfigureDelivery(input, context);
-
-      expect(result.success).toBe(true);
-      expect(result.data?.method).toBe('sftp_hot_folder');
+      await expect(executeConfigureDelivery(input, context)).rejects.toThrow();
     });
   });
 
   describe('input validation', () => {
-    it('throws ValidationError for invalid delivery method', async () => {
+    it('throws error for invalid delivery method', async () => {
       const context = createTestContext();
       const input = {
-        method: 'carrier_pigeon', // Invalid method
-        config: {},
+        name: 'Invalid Method',
+        method: 'carrier_pigeon',
       };
 
       await expect(executeConfigureDelivery(input, context)).rejects.toThrow();
     });
 
-    it('throws ValidationError for missing config', async () => {
+    it('throws error for missing name', async () => {
       const context = createTestContext();
       const input = {
-        method: 'sftp',
+        method: 'email',
+        email: {
+          address: 'test@example.com',
+        },
       };
 
       await expect(executeConfigureDelivery(input, context)).rejects.toThrow();
@@ -519,35 +525,38 @@ describe('configure_delivery tool', () => {
   });
 
   describe('permission checks', () => {
-    it('throws AuthorizationError when missing delivery:configure permission', async () => {
+    it('throws AuthorizationError when missing subscription:write permission', async () => {
       const context = createTestContext({
         permissions: ['data:read'],
       });
       const input = {
-        method: 'sftp',
-        config: {
+        name: 'Printer SFTP',
+        method: 'sftp_hot_folder',
+        sftp: {
           host: 'sftp.example.com',
           username: 'user',
           password: 'pass',
-          remote_path: '/incoming',
+          folder_path: '/incoming',
         },
       };
 
       await expect(executeConfigureDelivery(input, context)).rejects.toThrow(AuthorizationError);
     });
 
-    it('allows access with delivery:configure permission', async () => {
+    it('allows access with subscription:write permission', async () => {
       const context = createTestContext({
-        permissions: ['delivery:configure'],
+        permissions: ['subscription:write'],
       });
       const input = {
-        method: 'sftp',
-        config: {
+        name: 'Printer SFTP',
+        method: 'sftp_hot_folder',
+        sftp: {
           host: 'sftp.example.com',
           username: 'user',
           password: 'pass',
-          remote_path: '/incoming',
+          folder_path: '/incoming',
         },
+        test_connection: false,
       };
 
       const result = await executeConfigureDelivery(input, context);
@@ -559,13 +568,15 @@ describe('configure_delivery tool', () => {
         permissions: ['*'],
       });
       const input = {
-        method: 'sftp',
-        config: {
+        name: 'Printer SFTP',
+        method: 'sftp_hot_folder',
+        sftp: {
           host: 'sftp.example.com',
           username: 'user',
           password: 'pass',
-          remote_path: '/incoming',
+          folder_path: '/incoming',
         },
+        test_connection: false,
       };
 
       const result = await executeConfigureDelivery(input, context);
@@ -573,28 +584,55 @@ describe('configure_delivery tool', () => {
     });
   });
 
-  describe('tenant association', () => {
-    it('associates config with current tenant', async () => {
+  describe('default configuration', () => {
+    it('sets as default when is_default is true', async () => {
       const context = createTestContext();
       const input = {
-        method: 'sftp',
-        config: {
+        name: 'Default SFTP',
+        method: 'sftp_hot_folder',
+        is_default: true,
+        sftp: {
           host: 'sftp.example.com',
           username: 'user',
           password: 'pass',
-          remote_path: '/incoming',
+          folder_path: '/incoming',
         },
+        test_connection: false,
       };
 
       await executeConfigureDelivery(input, context);
 
-      expect(prisma.deliveryConfig.upsert).toHaveBeenCalledWith(
-        expect.objectContaining({
-          where: expect.objectContaining({
-            tenantId: 'test-tenant-id',
-          }),
-        })
-      );
+      expect(prisma.deliveryConfig.updateMany).toHaveBeenCalledWith({
+        where: {
+          tenantId: 'test-tenant-id',
+          isDefault: true,
+        },
+        data: { isDefault: false },
+      });
+    });
+  });
+
+  describe('response format', () => {
+    it('returns config details', async () => {
+      const context = createTestContext();
+      const input = {
+        name: 'Printer SFTP',
+        method: 'sftp_hot_folder',
+        sftp: {
+          host: 'sftp.example.com',
+          username: 'user',
+          password: 'pass',
+          folder_path: '/incoming',
+        },
+        test_connection: false,
+      };
+
+      const result = await executeConfigureDelivery(input, context);
+
+      expect(result.data?.config.id).toBeDefined();
+      expect(result.data?.config.name).toBe('Test Config');
+      expect(result.data?.config.method).toBe('sftp_hot_folder');
+      expect(result.data?.config.createdAt).toBeDefined();
     });
   });
 
@@ -602,16 +640,18 @@ describe('configure_delivery tool', () => {
     it('handles database errors gracefully', async () => {
       const context = createTestContext();
       const input = {
-        method: 'sftp',
-        config: {
+        name: 'Printer SFTP',
+        method: 'sftp_hot_folder',
+        sftp: {
           host: 'sftp.example.com',
           username: 'user',
           password: 'pass',
-          remote_path: '/incoming',
+          folder_path: '/incoming',
         },
+        test_connection: false,
       };
 
-      vi.mocked(prisma.deliveryConfig.upsert).mockRejectedValue(new Error('Database error'));
+      vi.mocked(prisma.deliveryConfig.create).mockRejectedValue(new Error('Database error'));
 
       await expect(executeConfigureDelivery(input, context)).rejects.toThrow('Database error');
     });

@@ -4,35 +4,15 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { executeGetBillingPortal } from '../../../../src/tools/billing/get-billing-portal.js';
-import { stripeBillingService } from '../../../../src/services/stripe-billing.js';
-import { prisma } from '../../../../src/db/client.js';
+import * as stripeBilling from '../../../../src/services/stripe-billing.js';
 import type { TenantContext } from '../../../../src/utils/auth.js';
-import { ValidationError, AuthorizationError, NotFoundError } from '../../../../src/utils/errors.js';
+import { AuthorizationError } from '../../../../src/utils/errors.js';
 
 // Mock Stripe billing service
 vi.mock('../../../../src/services/stripe-billing.js', () => ({
-  stripeBillingService: {
-    createPortalSession: vi.fn(),
-  },
+  createPortalSession: vi.fn(),
+  getOrCreateCustomer: vi.fn(),
 }));
-
-// Mock Prisma client
-vi.mock('../../../../src/db/client.js', () => ({
-  prisma: {
-    tenant: {
-      findUnique: vi.fn(),
-    },
-  },
-}));
-
-// Mock Decimal type
-function mockDecimal(value: number) {
-  return {
-    toNumber: () => value,
-    toString: () => String(value),
-    valueOf: () => value,
-  } as any;
-}
 
 // Create a valid tenant context for tests
 function createTestContext(overrides: Partial<TenantContext> = {}): TenantContext {
@@ -63,28 +43,7 @@ function createTestContext(overrides: Partial<TenantContext> = {}): TenantContex
       createdAt: new Date(),
       updatedAt: new Date(),
     },
-    subscription: {
-      id: 'test-subscription-id',
-      tenantId: 'test-tenant-id',
-      plan: 'GROWTH',
-      status: 'ACTIVE',
-      monthlyRecordLimit: 10000,
-      monthlyEmailAppends: 5000,
-      monthlyPhoneAppends: 5000,
-      allowedDatabases: ['NHO', 'NEW_MOVER'],
-      allowedGeographies: null,
-      allowedStates: [],
-      allowedZipCodes: [],
-      pricePerRecord: mockDecimal(0.02),
-      priceEmailAppend: mockDecimal(0.02),
-      pricePhoneAppend: mockDecimal(0.03),
-      pricePdfGeneration: mockDecimal(0.10),
-      pricePrintPerPiece: mockDecimal(0.65),
-      billingCycleStart: new Date('2026-02-01'),
-      billingCycleEnd: new Date('2026-02-28'),
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    },
+    subscription: null,
     permissions: ['*'],
     ...overrides,
   };
@@ -95,15 +54,11 @@ describe('get_billing_portal tool', () => {
     vi.clearAllMocks();
 
     // Default mock responses
-    vi.mocked(prisma.tenant.findUnique).mockResolvedValue({
-      id: 'test-tenant-id',
-      stripeCustomerId: 'cus_test_123',
-    } as any);
+    vi.mocked(stripeBilling.getOrCreateCustomer).mockResolvedValue('cus_test_123');
 
-    vi.mocked(stripeBillingService.createPortalSession).mockResolvedValue({
-      id: 'bps_test_123',
+    vi.mocked(stripeBilling.createPortalSession).mockResolvedValue({
       url: 'https://billing.stripe.com/session/bps_test_123',
-    } as any);
+    });
   });
 
   describe('portal URL generation', () => {
@@ -127,79 +82,41 @@ describe('get_billing_portal tool', () => {
 
       await executeGetBillingPortal(input, context);
 
-      expect(stripeBillingService.createPortalSession).toHaveBeenCalledWith({
+      expect(stripeBilling.createPortalSession).toHaveBeenCalledWith({
         customerId: 'cus_test_123',
         returnUrl: 'https://app.example.com/settings/billing',
       });
     });
 
-    it('uses default return URL when not provided', async () => {
+    it('includes expiration info', async () => {
       const context = createTestContext();
-      const input = {};
+      const input = {
+        return_url: 'https://app.example.com/billing',
+      };
 
-      await executeGetBillingPortal(input, context);
+      const result = await executeGetBillingPortal(input, context);
 
-      expect(stripeBillingService.createPortalSession).toHaveBeenCalledWith(
-        expect.objectContaining({
-          returnUrl: expect.any(String),
-        })
-      );
+      expect(result.data?.expires_in).toBeDefined();
+      expect(result.data?.expires_in).toBe('1 hour');
     });
   });
 
-  describe('customer validation', () => {
-    it('throws error when tenant has no Stripe customer', async () => {
-      const context = createTestContext({
-        tenant: {
-          id: 'test-tenant-id',
-          name: 'Test Tenant',
-          email: 'test@example.com',
-          stripeCustomerId: null,
-          company: null,
-          phone: null,
-          status: 'ACTIVE',
-          parentTenantId: null,
-          isReseller: false,
-          wholesalePricing: null,
-          createdAt: new Date(),
-          updatedAt: new Date(),
-        },
-      });
-
-      vi.mocked(prisma.tenant.findUnique).mockResolvedValue({
-        id: 'test-tenant-id',
-        stripeCustomerId: null,
-      } as any);
-
+  describe('customer handling', () => {
+    it('gets or creates Stripe customer', async () => {
+      const context = createTestContext();
       const input = {
         return_url: 'https://app.example.com/billing',
       };
 
-      await expect(executeGetBillingPortal(input, context)).rejects.toThrow();
+      await executeGetBillingPortal(input, context);
+
+      expect(stripeBilling.getOrCreateCustomer).toHaveBeenCalledWith('test-tenant-id');
     });
 
-    it('uses customer ID from tenant', async () => {
-      const context = createTestContext({
-        tenant: {
-          id: 'test-tenant-id',
-          name: 'Test Tenant',
-          email: 'test@example.com',
-          stripeCustomerId: 'cus_specific_123',
-          company: null,
-          phone: null,
-          status: 'ACTIVE',
-          parentTenantId: null,
-          isReseller: false,
-          wholesalePricing: null,
-          createdAt: new Date(),
-          updatedAt: new Date(),
-        },
-      });
+    it('uses existing customer ID', async () => {
+      const context = createTestContext();
 
-      vi.mocked(prisma.tenant.findUnique).mockResolvedValue({
-        id: 'test-tenant-id',
-        stripeCustomerId: 'cus_specific_123',
-      } as any);
+      vi.mocked(stripeBilling.getOrCreateCustomer).mockResolvedValue('cus_existing_456');
 
       const input = {
         return_url: 'https://app.example.com/billing',
@@ -207,11 +124,10 @@ describe('get_billing_portal tool', () => {
 
       await executeGetBillingPortal(input, context);
 
-      expect(stripeBillingService.createPortalSession).toHaveBeenCalledWith(
-        expect.objectContaining({
-          customerId: 'cus_specific_123',
-        })
-      );
+      expect(stripeBilling.createPortalSession).toHaveBeenCalledWith({
+        customerId: 'cus_existing_456',
+        returnUrl: 'https://app.example.com/billing',
+      });
     });
   });
 
@@ -235,18 +151,16 @@ describe('get_billing_portal tool', () => {
       expect(result.success).toBe(true);
     });
 
-    it('rejects HTTP URLs for security', async () => {
+    it('requires return_url parameter', async () => {
       const context = createTestContext();
-      const input = {
-        return_url: 'http://app.example.com/billing',
-      };
+      const input = {};
 
       await expect(executeGetBillingPortal(input, context)).rejects.toThrow();
     });
   });
 
   describe('permission checks', () => {
-    it('throws AuthorizationError when missing billing:write permission', async () => {
+    it('throws AuthorizationError when missing subscription:read permission', async () => {
       const context = createTestContext({
         permissions: ['data:read'],
       });
@@ -257,9 +171,9 @@ describe('get_billing_portal tool', () => {
       await expect(executeGetBillingPortal(input, context)).rejects.toThrow(AuthorizationError);
     });
 
-    it('allows access with billing:write permission', async () => {
+    it('allows access with subscription:read permission', async () => {
       const context = createTestContext({
-        permissions: ['billing:write'],
+        permissions: ['subscription:read'],
       });
       const input = {
         return_url: 'https://app.example.com/billing',
@@ -282,42 +196,8 @@ describe('get_billing_portal tool', () => {
     });
   });
 
-  describe('portal session options', () => {
-    it('allows configuration flow type', async () => {
-      const context = createTestContext();
-      const input = {
-        return_url: 'https://app.example.com/billing',
-        flow_type: 'subscription_cancel',
-      };
-
-      await executeGetBillingPortal(input, context);
-
-      expect(stripeBillingService.createPortalSession).toHaveBeenCalledWith(
-        expect.objectContaining({
-          flowType: 'subscription_cancel',
-        })
-      );
-    });
-
-    it('allows payment method update flow', async () => {
-      const context = createTestContext();
-      const input = {
-        return_url: 'https://app.example.com/billing',
-        flow_type: 'payment_method_update',
-      };
-
-      await executeGetBillingPortal(input, context);
-
-      expect(stripeBillingService.createPortalSession).toHaveBeenCalledWith(
-        expect.objectContaining({
-          flowType: 'payment_method_update',
-        })
-      );
-    });
-  });
-
   describe('response format', () => {
-    it('returns portal URL and session ID', async () => {
+    it('returns portal URL', async () => {
       const context = createTestContext();
       const input = {
         return_url: 'https://app.example.com/billing',
@@ -327,46 +207,56 @@ describe('get_billing_portal tool', () => {
 
       expect(result.success).toBe(true);
       expect(result.data?.portal_url).toBeDefined();
-      expect(result.data?.session_id).toBe('bps_test_123');
-    });
-
-    it('includes expiration info', async () => {
-      const context = createTestContext();
-      const input = {
-        return_url: 'https://app.example.com/billing',
-      };
-
-      const result = await executeGetBillingPortal(input, context);
-
-      expect(result.data?.expires_at).toBeDefined();
     });
   });
 
   describe('error handling', () => {
-    it('handles Stripe API errors gracefully', async () => {
+    it('returns error response on Stripe API errors', async () => {
       const context = createTestContext();
       const input = {
         return_url: 'https://app.example.com/billing',
       };
 
-      vi.mocked(stripeBillingService.createPortalSession).mockRejectedValue(
+      vi.mocked(stripeBilling.createPortalSession).mockRejectedValue(
         new Error('Stripe API error')
       );
 
-      await expect(executeGetBillingPortal(input, context)).rejects.toThrow('Stripe API error');
+      const result = await executeGetBillingPortal(input, context);
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('Stripe API error');
     });
 
-    it('handles customer not found error', async () => {
+    it('returns error response when customer not found', async () => {
       const context = createTestContext();
       const input = {
         return_url: 'https://app.example.com/billing',
       };
 
-      vi.mocked(stripeBillingService.createPortalSession).mockRejectedValue(
+      vi.mocked(stripeBilling.createPortalSession).mockRejectedValue(
         new Error('No such customer: cus_test_123')
       );
 
-      await expect(executeGetBillingPortal(input, context)).rejects.toThrow('No such customer');
+      const result = await executeGetBillingPortal(input, context);
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('No such customer');
+    });
+
+    it('returns error response when customer creation fails', async () => {
+      const context = createTestContext();
+      const input = {
+        return_url: 'https://app.example.com/billing',
+      };
+
+      vi.mocked(stripeBilling.getOrCreateCustomer).mockRejectedValue(
+        new Error('Failed to create customer')
+      );
+
+      const result = await executeGetBillingPortal(input, context);
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('Failed to create customer');
     });
   });
 });

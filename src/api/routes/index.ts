@@ -9,3 +9,4 @@ export { default as templateRoutes } from './templates.js';
 export { default as deliveryRoutes } from './delivery.js';
 export { default as billingRoutes } from './billing.js';
 export { default as platformRoutes } from './platforms.js';
+export { default as emailRoutes } from './email.js';

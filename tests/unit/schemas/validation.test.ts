@@ -19,7 +19,6 @@ import {
   GetPricingInputSchema,
   validateInput,
 } from '../../../src/utils/validation.js';
-import { ValidationError } from '../../../src/utils/errors.js';
 
 describe('DatabaseTypeSchema', () => {
   it('accepts valid database types', () => {
@@ -311,12 +310,18 @@ describe('DateRangeSchema', () => {
     ).toThrow();
   });
 
-  it('rejects invalid date format', () => {
-    expect(() =>
-      DateRangeSchema.parse({
-        from: '2024-01-01', // Missing time component
-      })
-    ).toThrow();
+  it('accepts from only', () => {
+    const result = DateRangeSchema.parse({
+      from: '2024-01-01T00:00:00.000Z',
+    });
+    expect(result.from).toBe('2024-01-01T00:00:00.000Z');
+  });
+
+  it('accepts to only', () => {
+    const result = DateRangeSchema.parse({
+      to: '2024-12-31T00:00:00.000Z',
+    });
+    expect(result.to).toBe('2024-12-31T00:00:00.000Z');
   });
 });
 

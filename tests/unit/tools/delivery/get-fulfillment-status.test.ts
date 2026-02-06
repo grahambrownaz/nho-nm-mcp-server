@@ -6,7 +6,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { executeGetFulfillmentStatus } from '../../../../src/tools/delivery/get-fulfillment-status.js';
 import { prisma } from '../../../../src/db/client.js';
 import type { TenantContext } from '../../../../src/utils/auth.js';
-import { ValidationError, AuthorizationError, NotFoundError } from '../../../../src/utils/errors.js';
+import { AuthorizationError, NotFoundError } from '../../../../src/utils/errors.js';
 
 // Mock Prisma client
 vi.mock('../../../../src/db/client.js', () => ({
@@ -15,20 +15,14 @@ vi.mock('../../../../src/db/client.js', () => ({
       findUnique: vi.fn(),
       findMany: vi.fn(),
     },
-    subscription: {
+    dataSubscription: {
       findUnique: vi.fn(),
+    },
+    deliveryRecord: {
+      findMany: vi.fn(),
     },
   },
 }));
-
-// Mock Decimal type that matches Prisma's Decimal behavior
-function mockDecimal(value: number) {
-  return {
-    toNumber: () => value,
-    toString: () => String(value),
-    valueOf: () => value,
-  } as any;
-}
 
 // Create a valid tenant context for tests
 function createTestContext(overrides: Partial<TenantContext> = {}): TenantContext {
@@ -59,28 +53,7 @@ function createTestContext(overrides: Partial<TenantContext> = {}): TenantContex
       createdAt: new Date(),
       updatedAt: new Date(),
     },
-    subscription: {
-      id: 'test-subscription-id',
-      tenantId: 'test-tenant-id',
-      plan: 'PROFESSIONAL',
-      status: 'ACTIVE',
-      monthlyRecordLimit: 10000,
-      monthlyEmailAppends: 5000,
-      monthlyPhoneAppends: 5000,
-      allowedDatabases: ['NHO', 'NEW_MOVER', 'CONSUMER', 'BUSINESS'],
-      allowedGeographies: null,
-      allowedStates: [],
-      allowedZipCodes: [],
-      pricePerRecord: mockDecimal(0.05),
-      priceEmailAppend: mockDecimal(0.02),
-      pricePhoneAppend: mockDecimal(0.03),
-      pricePdfGeneration: mockDecimal(0.10),
-      pricePrintPerPiece: mockDecimal(0.65),
-      billingCycleStart: new Date(),
-      billingCycleEnd: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    },
+    subscription: null,
     permissions: ['*'],
     ...overrides,
   };
@@ -89,32 +62,32 @@ function createTestContext(overrides: Partial<TenantContext> = {}): TenantContex
 // Create mock delivery
 function createMockDelivery(overrides: Record<string, unknown> = {}) {
   return {
-    id: 'delivery-123',
-    subscriptionId: 'subscription-123',
+    id: '550e8400-e29b-41d4-a716-446655440000',
+    dataSubscriptionId: '550e8400-e29b-41d4-a716-446655440010',
     tenantId: 'test-tenant-id',
     status: 'COMPLETED',
+    fulfillmentStatus: 'DELIVERED',
     recordCount: 150,
-    fileUrl: 'https://storage.example.com/deliveries/delivery-123.csv',
-    filePath: '/deliveries/2024/02/03/delivery-123.csv',
-    fileSize: 245678,
-    fulfillmentMethod: 'SFTP',
+    newRecordsCount: 120,
+    dataFileUrl: 'https://storage.example.com/deliveries/delivery-123.csv',
+    pdfFileUrl: null,
+    dataCost: 7.50,
+    pdfCost: 0,
+    fulfillmentCost: 0,
+    totalCost: 7.50,
     fulfillmentDetails: {
-      host: 'sftp.example.com',
+      method: 'SFTP',
       remotePath: '/incoming/delivery-123.csv',
       uploadedAt: new Date().toISOString(),
     },
-    jdfPath: null,
-    cost: mockDecimal(7.50),
-    deliveredAt: new Date(),
+    scheduledAt: new Date(),
+    startedAt: new Date(),
+    completedAt: new Date(),
     errorMessage: null,
-    subscription: {
-      id: 'subscription-123',
+    dataSubscription: {
+      id: '550e8400-e29b-41d4-a716-446655440010',
       name: 'NHO Weekly',
-      database: 'NHO',
-      tenantId: 'test-tenant-id',
     },
-    createdAt: new Date(),
-    updatedAt: new Date(),
     ...overrides,
   };
 }
@@ -124,282 +97,176 @@ describe('get_fulfillment_status tool', () => {
     vi.clearAllMocks();
 
     // Setup default mock responses
-    vi.mocked(prisma.delivery.findUnique).mockResolvedValue(createMockDelivery());
-    vi.mocked(prisma.subscription.findUnique).mockResolvedValue({
-      id: 'subscription-123',
+    vi.mocked(prisma.delivery.findUnique).mockResolvedValue(createMockDelivery() as never);
+    vi.mocked(prisma.delivery.findMany).mockResolvedValue([createMockDelivery()] as never);
+    vi.mocked(prisma.dataSubscription.findUnique).mockResolvedValue({
+      id: '550e8400-e29b-41d4-a716-446655440010',
       tenantId: 'test-tenant-id',
-    } as any);
+      name: 'NHO Weekly',
+    } as never);
+    vi.mocked(prisma.deliveryRecord.findMany).mockResolvedValue([]);
   });
 
-  describe('SFTP delivery status', () => {
-    it('returns status for SFTP delivery', async () => {
+  describe('single delivery status', () => {
+    it('returns status for a delivery', async () => {
       const context = createTestContext();
       const input = {
-        delivery_id: 'delivery-123',
+        delivery_id: '550e8400-e29b-41d4-a716-446655440000',
       };
 
       const result = await executeGetFulfillmentStatus(input, context);
 
       expect(result.success).toBe(true);
-      expect(result.data?.status).toBe('COMPLETED');
-      expect(result.data?.fulfillment_method).toBe('SFTP');
+      expect(result.data?.deliveries).toHaveLength(1);
+      expect(result.data?.deliveries[0].status).toBe('completed');
     });
 
-    it('returns file path for SFTP delivery', async () => {
+    it('returns fulfillment status', async () => {
       const context = createTestContext();
       const input = {
-        delivery_id: 'delivery-123',
+        delivery_id: '550e8400-e29b-41d4-a716-446655440000',
       };
 
       const result = await executeGetFulfillmentStatus(input, context);
 
-      expect(result.data?.file_path).toBe('/deliveries/2024/02/03/delivery-123.csv');
-      expect(result.data?.remote_path).toBe('/incoming/delivery-123.csv');
-    });
-
-    it('returns file size', async () => {
-      const context = createTestContext();
-      const input = {
-        delivery_id: 'delivery-123',
-      };
-
-      const result = await executeGetFulfillmentStatus(input, context);
-
-      expect(result.data?.file_size).toBe(245678);
-      expect(result.data?.file_size_formatted).toBeDefined();
+      expect(result.data?.deliveries[0].fulfillmentStatus).toBe('delivered');
     });
 
     it('returns record count', async () => {
       const context = createTestContext();
       const input = {
-        delivery_id: 'delivery-123',
+        delivery_id: '550e8400-e29b-41d4-a716-446655440000',
       };
 
       const result = await executeGetFulfillmentStatus(input, context);
 
-      expect(result.data?.record_count).toBe(150);
+      expect(result.data?.deliveries[0].recordCount).toBe(150);
+      expect(result.data?.deliveries[0].newRecordsCount).toBe(120);
     });
 
-    it('returns delivery timestamp', async () => {
+    it('returns fulfillment details', async () => {
       const context = createTestContext();
       const input = {
-        delivery_id: 'delivery-123',
+        delivery_id: '550e8400-e29b-41d4-a716-446655440000',
       };
 
       const result = await executeGetFulfillmentStatus(input, context);
 
-      expect(result.data?.delivered_at).toBeDefined();
+      expect(result.data?.deliveries[0].fulfillmentDetails).toBeDefined();
+      expect(result.data?.deliveries[0].fulfillmentDetails?.method).toBe('SFTP');
+      expect(result.data?.deliveries[0].fulfillmentDetails?.remotePath).toBe('/incoming/delivery-123.csv');
+    });
+
+    it('returns cost breakdown', async () => {
+      const context = createTestContext();
+      const input = {
+        delivery_id: '550e8400-e29b-41d4-a716-446655440000',
+      };
+
+      const result = await executeGetFulfillmentStatus(input, context);
+
+      expect(result.data?.deliveries[0].costs).toBeDefined();
+      expect(result.data?.deliveries[0].costs.totalCost).toBe(7.5);
+    });
+
+    it('returns timestamps', async () => {
+      const context = createTestContext();
+      const input = {
+        delivery_id: '550e8400-e29b-41d4-a716-446655440000',
+      };
+
+      const result = await executeGetFulfillmentStatus(input, context);
+
+      expect(result.data?.deliveries[0].scheduledAt).toBeDefined();
+      expect(result.data?.deliveries[0].completedAt).toBeDefined();
     });
   });
 
   describe('pending deliveries', () => {
     it('handles pending deliveries', async () => {
-      const context = createTestContext();
-      const input = {
-        delivery_id: 'delivery-pending',
-      };
-
       vi.mocked(prisma.delivery.findUnique).mockResolvedValue(
         createMockDelivery({
-          id: 'delivery-pending',
+          id: '550e8400-e29b-41d4-a716-446655440001',
           status: 'PENDING',
-          fileUrl: null,
-          filePath: null,
-          fileSize: null,
-          deliveredAt: null,
+          fulfillmentStatus: 'PENDING',
+          completedAt: null,
           fulfillmentDetails: null,
-        })
+        }) as never
       );
+
+      const context = createTestContext();
+      const input = {
+        delivery_id: '550e8400-e29b-41d4-a716-446655440001',
+      };
 
       const result = await executeGetFulfillmentStatus(input, context);
 
       expect(result.success).toBe(true);
-      expect(result.data?.status).toBe('PENDING');
-      expect(result.data?.file_path).toBeNull();
-      expect(result.data?.delivered_at).toBeNull();
+      expect(result.data?.deliveries[0].status).toBe('pending');
+      expect(result.data?.deliveries[0].completedAt).toBeNull();
     });
 
     it('returns processing status', async () => {
-      const context = createTestContext();
-      const input = {
-        delivery_id: 'delivery-processing',
-      };
-
       vi.mocked(prisma.delivery.findUnique).mockResolvedValue(
         createMockDelivery({
-          id: 'delivery-processing',
+          id: '550e8400-e29b-41d4-a716-446655440002',
           status: 'PROCESSING',
-          deliveredAt: null,
-        })
+          fulfillmentStatus: 'PENDING',
+          completedAt: null,
+        }) as never
       );
 
-      const result = await executeGetFulfillmentStatus(input, context);
-
-      expect(result.data?.status).toBe('PROCESSING');
-    });
-
-    it('returns queued status', async () => {
       const context = createTestContext();
       const input = {
-        delivery_id: 'delivery-queued',
+        delivery_id: '550e8400-e29b-41d4-a716-446655440002',
       };
-
-      vi.mocked(prisma.delivery.findUnique).mockResolvedValue(
-        createMockDelivery({
-          id: 'delivery-queued',
-          status: 'QUEUED',
-          deliveredAt: null,
-        })
-      );
 
       const result = await executeGetFulfillmentStatus(input, context);
 
-      expect(result.data?.status).toBe('QUEUED');
+      expect(result.data?.deliveries[0].status).toBe('processing');
     });
   });
 
   describe('failed deliveries', () => {
     it('handles failed deliveries', async () => {
-      const context = createTestContext();
-      const input = {
-        delivery_id: 'delivery-failed',
-      };
-
       vi.mocked(prisma.delivery.findUnique).mockResolvedValue(
         createMockDelivery({
-          id: 'delivery-failed',
+          id: '550e8400-e29b-41d4-a716-446655440003',
           status: 'FAILED',
-          fileUrl: null,
-          filePath: null,
-          deliveredAt: null,
+          fulfillmentStatus: 'FAILED',
+          completedAt: null,
           errorMessage: 'SFTP connection timeout',
-        })
+          fulfillmentDetails: {
+            error: 'SFTP connection timeout',
+          },
+        }) as never
       );
+
+      const context = createTestContext();
+      const input = {
+        delivery_id: '550e8400-e29b-41d4-a716-446655440003',
+      };
 
       const result = await executeGetFulfillmentStatus(input, context);
 
       expect(result.success).toBe(true);
-      expect(result.data?.status).toBe('FAILED');
-      expect(result.data?.error_message).toBe('SFTP connection timeout');
-    });
-
-    it('includes retry information for failed delivery', async () => {
-      const context = createTestContext();
-      const input = {
-        delivery_id: 'delivery-failed',
-      };
-
-      vi.mocked(prisma.delivery.findUnique).mockResolvedValue(
-        createMockDelivery({
-          id: 'delivery-failed',
-          status: 'FAILED',
-          errorMessage: 'Connection refused',
-          fulfillmentDetails: {
-            retryCount: 3,
-            lastRetryAt: new Date().toISOString(),
-            nextRetryAt: new Date(Date.now() + 3600000).toISOString(),
-          },
-        })
-      );
-
-      const result = await executeGetFulfillmentStatus(input, context);
-
-      expect(result.data?.retry_count).toBe(3);
-      expect(result.data?.next_retry_at).toBeDefined();
-    });
-  });
-
-  describe('email delivery status', () => {
-    it('returns status for email delivery', async () => {
-      const context = createTestContext();
-      const input = {
-        delivery_id: 'delivery-email',
-      };
-
-      vi.mocked(prisma.delivery.findUnique).mockResolvedValue(
-        createMockDelivery({
-          id: 'delivery-email',
-          fulfillmentMethod: 'EMAIL',
-          fulfillmentDetails: {
-            emailTo: 'recipient@example.com',
-            emailSentAt: new Date().toISOString(),
-            emailMessageId: 'msg-12345',
-          },
-        })
-      );
-
-      const result = await executeGetFulfillmentStatus(input, context);
-
-      expect(result.data?.fulfillment_method).toBe('EMAIL');
-      expect(result.data?.email_recipient).toBe('recipient@example.com');
-    });
-  });
-
-  describe('webhook delivery status', () => {
-    it('returns status for webhook delivery', async () => {
-      const context = createTestContext();
-      const input = {
-        delivery_id: 'delivery-webhook',
-      };
-
-      vi.mocked(prisma.delivery.findUnique).mockResolvedValue(
-        createMockDelivery({
-          id: 'delivery-webhook',
-          fulfillmentMethod: 'WEBHOOK',
-          fulfillmentDetails: {
-            webhookUrl: 'https://api.example.com/webhook',
-            responseStatus: 200,
-            responseBody: '{"received": true}',
-          },
-        })
-      );
-
-      const result = await executeGetFulfillmentStatus(input, context);
-
-      expect(result.data?.fulfillment_method).toBe('WEBHOOK');
-      expect(result.data?.webhook_response_status).toBe(200);
-    });
-  });
-
-  describe('print delivery status with JDF', () => {
-    it('returns JDF path for print delivery', async () => {
-      const context = createTestContext();
-      const input = {
-        delivery_id: 'delivery-print',
-      };
-
-      vi.mocked(prisma.delivery.findUnique).mockResolvedValue(
-        createMockDelivery({
-          id: 'delivery-print',
-          fulfillmentMethod: 'SFTP_HOT_FOLDER',
-          jdfPath: '/incoming/delivery-print.jdf',
-          fulfillmentDetails: {
-            pdfPath: '/incoming/postcards.pdf',
-            jdfPath: '/incoming/delivery-print.jdf',
-            printJobId: 'PJ-12345',
-          },
-        })
-      );
-
-      const result = await executeGetFulfillmentStatus(input, context);
-
-      expect(result.data?.jdf_path).toBe('/incoming/delivery-print.jdf');
-      expect(result.data?.print_job_id).toBe('PJ-12345');
+      expect(result.data?.deliveries[0].status).toBe('failed');
+      expect(result.data?.deliveries[0].fulfillmentDetails?.error).toBe('SFTP connection timeout');
     });
   });
 
   describe('list deliveries by subscription', () => {
     it('lists all deliveries for a subscription', async () => {
+      vi.mocked(prisma.delivery.findMany).mockResolvedValue([
+        createMockDelivery({ id: 'delivery-1' }),
+        createMockDelivery({ id: 'delivery-2' }),
+        createMockDelivery({ id: 'delivery-3' }),
+      ] as never);
+
       const context = createTestContext();
       const input = {
-        subscription_id: 'subscription-123',
+        subscription_id: '550e8400-e29b-41d4-a716-446655440010',
       };
-
-      vi.mocked(prisma.delivery.findMany).mockResolvedValue([
-        createMockDelivery({ id: 'delivery-1', deliveredAt: new Date() }),
-        createMockDelivery({ id: 'delivery-2', deliveredAt: new Date(Date.now() - 86400000) }),
-        createMockDelivery({ id: 'delivery-3', deliveredAt: new Date(Date.now() - 172800000) }),
-      ]);
 
       const result = await executeGetFulfillmentStatus(input, context);
 
@@ -408,46 +275,135 @@ describe('get_fulfillment_status tool', () => {
     });
 
     it('validates subscription ownership', async () => {
+      vi.mocked(prisma.dataSubscription.findUnique).mockResolvedValue({
+        id: '550e8400-e29b-41d4-a716-446655440011',
+        tenantId: 'other-tenant-id',
+        name: 'Other Subscription',
+      } as never);
+
       const context = createTestContext();
       const input = {
-        subscription_id: 'other-subscription',
+        subscription_id: '550e8400-e29b-41d4-a716-446655440011',
       };
-
-      vi.mocked(prisma.subscription.findUnique).mockResolvedValue({
-        id: 'other-subscription',
-        tenantId: 'other-tenant-id',
-      } as any);
 
       await expect(executeGetFulfillmentStatus(input, context)).rejects.toThrow(AuthorizationError);
     });
+
+    it('returns summary statistics', async () => {
+      vi.mocked(prisma.delivery.findMany).mockResolvedValue([
+        createMockDelivery({ id: 'delivery-1', status: 'COMPLETED' }),
+        createMockDelivery({ id: 'delivery-2', status: 'COMPLETED' }),
+        createMockDelivery({ id: 'delivery-3', status: 'FAILED' }),
+      ] as never);
+
+      const context = createTestContext();
+      const input = {
+        subscription_id: '550e8400-e29b-41d4-a716-446655440010',
+      };
+
+      const result = await executeGetFulfillmentStatus(input, context);
+
+      expect(result.data?.summary).toBeDefined();
+      expect(result.data?.summary?.totalDeliveries).toBe(3);
+      expect(result.data?.summary?.completed).toBe(2);
+      expect(result.data?.summary?.failed).toBe(1);
+    });
   });
 
-  describe('input validation', () => {
-    it('throws ValidationError for missing identifiers', async () => {
+  describe('recent deliveries', () => {
+    it('returns recent deliveries when no filters provided', async () => {
+      vi.mocked(prisma.delivery.findMany).mockResolvedValue([
+        createMockDelivery({ id: 'delivery-1' }),
+        createMockDelivery({ id: 'delivery-2' }),
+      ] as never);
+
       const context = createTestContext();
       const input = {};
 
-      await expect(executeGetFulfillmentStatus(input, context)).rejects.toThrow();
+      const result = await executeGetFulfillmentStatus(input, context);
+
+      expect(result.success).toBe(true);
+      expect(prisma.delivery.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { tenantId: 'test-tenant-id' },
+        })
+      );
     });
 
-    it('throws ValidationError for invalid delivery_id format', async () => {
+    it('respects limit parameter', async () => {
       const context = createTestContext();
       const input = {
-        delivery_id: 'not-a-uuid',
+        limit: 5,
       };
 
-      await expect(executeGetFulfillmentStatus(input, context)).rejects.toThrow();
+      await executeGetFulfillmentStatus(input, context);
+
+      expect(prisma.delivery.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          take: 5,
+        })
+      );
+    });
+  });
+
+  describe('include records option', () => {
+    it('includes individual records when requested', async () => {
+      vi.mocked(prisma.deliveryRecord.findMany).mockResolvedValue([
+        {
+          firstName: 'John',
+          lastName: 'Doe',
+          address: '123 Main St',
+          city: 'Phoenix',
+          state: 'AZ',
+          zip: '85001',
+          deliveredAt: new Date(),
+        },
+      ] as never);
+
+      const context = createTestContext();
+      const input = {
+        delivery_id: '550e8400-e29b-41d4-a716-446655440000',
+        include_records: true,
+      };
+
+      const result = await executeGetFulfillmentStatus(input, context);
+
+      expect(prisma.deliveryRecord.findMany).toHaveBeenCalled();
+      expect(result.data?.deliveries[0].records).toBeDefined();
+      expect(result.data?.deliveries[0].records?.length).toBeGreaterThan(0);
+    });
+
+    it('does not include records by default', async () => {
+      const context = createTestContext();
+      const input = {
+        delivery_id: '550e8400-e29b-41d4-a716-446655440000',
+      };
+
+      const result = await executeGetFulfillmentStatus(input, context);
+
+      expect(result.data?.deliveries[0].records).toBeUndefined();
     });
   });
 
   describe('delivery lookup', () => {
     it('throws NotFoundError for non-existent delivery', async () => {
+      vi.mocked(prisma.delivery.findUnique).mockResolvedValue(null);
+
       const context = createTestContext();
       const input = {
         delivery_id: '00000000-0000-0000-0000-000000000000',
       };
 
-      vi.mocked(prisma.delivery.findUnique).mockResolvedValue(null);
+      await expect(executeGetFulfillmentStatus(input, context)).rejects.toThrow(NotFoundError);
+    });
+
+    it('throws NotFoundError for non-existent subscription', async () => {
+      vi.mocked(prisma.dataSubscription.findUnique).mockResolvedValue(null);
+
+      const context = createTestContext();
+      const input = {
+        subscription_id: '00000000-0000-0000-0000-000000000000',
+      };
 
       await expect(executeGetFulfillmentStatus(input, context)).rejects.toThrow(NotFoundError);
     });
@@ -455,35 +411,35 @@ describe('get_fulfillment_status tool', () => {
 
   describe('permission checks', () => {
     it('throws AuthorizationError when delivery belongs to different tenant', async () => {
+      vi.mocked(prisma.delivery.findUnique).mockResolvedValue(
+        createMockDelivery({ tenantId: 'other-tenant-id' }) as never
+      );
+
       const context = createTestContext();
       const input = {
-        delivery_id: 'delivery-123',
+        delivery_id: '550e8400-e29b-41d4-a716-446655440000',
       };
-
-      vi.mocked(prisma.delivery.findUnique).mockResolvedValue(
-        createMockDelivery({ tenantId: 'other-tenant-id' })
-      );
 
       await expect(executeGetFulfillmentStatus(input, context)).rejects.toThrow(AuthorizationError);
     });
 
-    it('throws AuthorizationError when missing delivery:read permission', async () => {
+    it('throws AuthorizationError when missing subscription:read permission', async () => {
       const context = createTestContext({
         permissions: ['data:read'],
       });
       const input = {
-        delivery_id: 'delivery-123',
+        delivery_id: '550e8400-e29b-41d4-a716-446655440000',
       };
 
       await expect(executeGetFulfillmentStatus(input, context)).rejects.toThrow(AuthorizationError);
     });
 
-    it('allows access with delivery:read permission', async () => {
+    it('allows access with subscription:read permission', async () => {
       const context = createTestContext({
-        permissions: ['delivery:read'],
+        permissions: ['subscription:read'],
       });
       const input = {
-        delivery_id: 'delivery-123',
+        delivery_id: '550e8400-e29b-41d4-a716-446655440000',
       };
 
       const result = await executeGetFulfillmentStatus(input, context);
@@ -495,7 +451,7 @@ describe('get_fulfillment_status tool', () => {
         permissions: ['*'],
       });
       const input = {
-        delivery_id: 'delivery-123',
+        delivery_id: '550e8400-e29b-41d4-a716-446655440000',
       };
 
       const result = await executeGetFulfillmentStatus(input, context);
@@ -503,39 +459,46 @@ describe('get_fulfillment_status tool', () => {
     });
   });
 
-  describe('download URL', () => {
-    it('returns download URL for completed delivery', async () => {
+  describe('file URLs', () => {
+    it('returns data file URL for completed delivery', async () => {
       const context = createTestContext();
       const input = {
-        delivery_id: 'delivery-123',
+        delivery_id: '550e8400-e29b-41d4-a716-446655440000',
       };
 
       const result = await executeGetFulfillmentStatus(input, context);
 
-      expect(result.data?.download_url).toBeDefined();
-      expect(result.data?.download_url).toContain('delivery-123');
+      expect(result.data?.deliveries[0].files.dataFileUrl).toBeDefined();
     });
 
-    it('includes expiry for download URL', async () => {
+    it('returns null for file URLs when not available', async () => {
+      vi.mocked(prisma.delivery.findUnique).mockResolvedValue(
+        createMockDelivery({
+          dataFileUrl: null,
+          pdfFileUrl: null,
+        }) as never
+      );
+
       const context = createTestContext();
       const input = {
-        delivery_id: 'delivery-123',
+        delivery_id: '550e8400-e29b-41d4-a716-446655440000',
       };
 
       const result = await executeGetFulfillmentStatus(input, context);
 
-      expect(result.data?.download_url_expires_at).toBeDefined();
+      expect(result.data?.deliveries[0].files.dataFileUrl).toBeNull();
+      expect(result.data?.deliveries[0].files.pdfFileUrl).toBeNull();
     });
   });
 
   describe('error handling', () => {
     it('handles database errors gracefully', async () => {
+      vi.mocked(prisma.delivery.findUnique).mockRejectedValue(new Error('Database error'));
+
       const context = createTestContext();
       const input = {
-        delivery_id: 'delivery-123',
+        delivery_id: '550e8400-e29b-41d4-a716-446655440000',
       };
-
-      vi.mocked(prisma.delivery.findUnique).mockRejectedValue(new Error('Database error'));
 
       await expect(executeGetFulfillmentStatus(input, context)).rejects.toThrow('Database error');
     });

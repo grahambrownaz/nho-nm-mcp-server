@@ -11,7 +11,7 @@ import { AuthorizationError } from '../../../../src/utils/errors.js';
 // Mock Prisma client
 vi.mock('../../../../src/db/client.js', () => ({
   prisma: {
-    subscription: {
+    dataSubscription: {
       findMany: vi.fn(),
       count: vi.fn(),
     },
@@ -61,18 +61,17 @@ function createTestContext(overrides: Partial<TenantContext> = {}): TenantContex
       tenantId: 'test-tenant-id',
       plan: 'PROFESSIONAL',
       status: 'ACTIVE',
+      stripeSubscriptionId: null,
       monthlyRecordLimit: 10000,
       monthlyEmailAppends: 5000,
       monthlyPhoneAppends: 5000,
       allowedDatabases: ['NHO', 'NEW_MOVER', 'CONSUMER', 'BUSINESS'],
-      allowedGeographies: null,
       allowedStates: [],
       allowedZipCodes: [],
       pricePerRecord: mockDecimal(0.05),
       priceEmailAppend: mockDecimal(0.02),
       pricePhoneAppend: mockDecimal(0.03),
       pricePdfGeneration: mockDecimal(0.10),
-      pricePrintPerPiece: mockDecimal(0.65),
       billingCycleStart: new Date(),
       billingCycleEnd: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
       createdAt: new Date(),
@@ -87,78 +86,106 @@ function createTestContext(overrides: Partial<TenantContext> = {}): TenantContex
 function createMockSubscriptions() {
   return [
     {
-      id: 'sub-1',
+      id: '00000000-0000-0000-0000-000000000001',
       name: 'NHO Weekly',
       tenantId: 'test-tenant-id',
+      clientName: 'Client A',
+      clientEmail: null,
+      clientPhone: null,
       database: 'NHO',
       geography: { type: 'zip', values: ['85001'] },
       filters: {},
       frequency: 'WEEKLY',
       status: 'ACTIVE',
       templateId: null,
+      template: null,
       fulfillmentMethod: 'DOWNLOAD',
       fulfillmentConfig: {},
       syncChannels: [],
-      clientInfo: { name: 'Client A', identifier: 'CA001' },
-      nextDelivery: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
-      lastDelivery: new Date(),
+      nextDeliveryAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+      lastDeliveryAt: new Date(),
+      pausedAt: null,
+      cancelledAt: null,
+      totalDeliveries: 5,
+      totalRecords: 500,
       createdAt: new Date(),
       updatedAt: new Date(),
     },
     {
-      id: 'sub-2',
+      id: '00000000-0000-0000-0000-000000000002',
       name: 'New Mover Monthly',
       tenantId: 'test-tenant-id',
+      clientName: 'Client B',
+      clientEmail: null,
+      clientPhone: null,
       database: 'NEW_MOVER',
       geography: { type: 'state', values: ['AZ'] },
       filters: {},
       frequency: 'MONTHLY',
       status: 'ACTIVE',
       templateId: 'template-1',
+      template: { name: 'Test Template' },
       fulfillmentMethod: 'EMAIL',
       fulfillmentConfig: { email: 'test@example.com' },
       syncChannels: [],
-      clientInfo: { name: 'Client B', identifier: 'CB001' },
-      nextDelivery: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
-      lastDelivery: new Date(),
+      nextDeliveryAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+      lastDeliveryAt: new Date(),
+      pausedAt: null,
+      cancelledAt: null,
+      totalDeliveries: 3,
+      totalRecords: 300,
       createdAt: new Date(),
       updatedAt: new Date(),
     },
     {
-      id: 'sub-3',
+      id: '00000000-0000-0000-0000-000000000003',
       name: 'Business Daily',
       tenantId: 'test-tenant-id',
+      clientName: null,
+      clientEmail: null,
+      clientPhone: null,
       database: 'BUSINESS',
       geography: { type: 'nationwide' },
       filters: {},
       frequency: 'DAILY',
       status: 'PAUSED',
       templateId: null,
+      template: null,
       fulfillmentMethod: 'FTP',
       fulfillmentConfig: {},
       syncChannels: [],
-      clientInfo: null,
-      nextDelivery: null,
-      lastDelivery: new Date(),
+      nextDeliveryAt: null,
+      lastDeliveryAt: new Date(),
+      pausedAt: new Date(),
+      cancelledAt: null,
+      totalDeliveries: 10,
+      totalRecords: 1000,
       createdAt: new Date(),
       updatedAt: new Date(),
     },
     {
-      id: 'sub-4',
+      id: '00000000-0000-0000-0000-000000000004',
       name: 'Consumer Weekly',
       tenantId: 'test-tenant-id',
+      clientName: 'Client A',
+      clientEmail: null,
+      clientPhone: null,
       database: 'CONSUMER',
       geography: { type: 'city', values: ['Phoenix'] },
       filters: {},
       frequency: 'WEEKLY',
       status: 'CANCELLED',
       templateId: null,
+      template: null,
       fulfillmentMethod: 'DOWNLOAD',
       fulfillmentConfig: {},
       syncChannels: [],
-      clientInfo: { name: 'Client A', identifier: 'CA001' },
-      nextDelivery: null,
-      lastDelivery: new Date(),
+      nextDeliveryAt: null,
+      lastDeliveryAt: new Date(),
+      pausedAt: null,
+      cancelledAt: new Date(),
+      totalDeliveries: 2,
+      totalRecords: 200,
       createdAt: new Date(),
       updatedAt: new Date(),
     },
@@ -170,8 +197,8 @@ describe('list_subscriptions tool', () => {
     vi.clearAllMocks();
 
     // Setup default mock responses
-    vi.mocked(prisma.subscription.findMany).mockResolvedValue(createMockSubscriptions());
-    vi.mocked(prisma.subscription.count).mockResolvedValue(4);
+    vi.mocked(prisma.dataSubscription.findMany).mockResolvedValue(createMockSubscriptions() as any);
+    vi.mocked(prisma.dataSubscription.count).mockResolvedValue(4);
   });
 
   describe('basic listing', () => {
@@ -183,7 +210,7 @@ describe('list_subscriptions tool', () => {
 
       expect(result.success).toBe(true);
       expect(result.data?.subscriptions).toHaveLength(4);
-      expect(result.data?.total).toBe(4);
+      expect(result.data?.pagination?.total).toBe(4);
     });
 
     it('returns subscriptions with correct fields', async () => {
@@ -198,21 +225,21 @@ describe('list_subscriptions tool', () => {
       expect(sub).toHaveProperty('database');
       expect(sub).toHaveProperty('status');
       expect(sub).toHaveProperty('frequency');
-      expect(sub).toHaveProperty('next_delivery');
+      expect(sub).toHaveProperty('nextDeliveryAt');
     });
 
     it('returns empty list when no subscriptions exist', async () => {
       const context = createTestContext();
       const input = {};
 
-      vi.mocked(prisma.subscription.findMany).mockResolvedValue([]);
-      vi.mocked(prisma.subscription.count).mockResolvedValue(0);
+      vi.mocked(prisma.dataSubscription.findMany).mockResolvedValue([]);
+      vi.mocked(prisma.dataSubscription.count).mockResolvedValue(0);
 
       const result = await executeListSubscriptions(input, context);
 
       expect(result.success).toBe(true);
       expect(result.data?.subscriptions).toHaveLength(0);
-      expect(result.data?.total).toBe(0);
+      expect(result.data?.pagination?.total).toBe(0);
     });
   });
 
@@ -222,13 +249,13 @@ describe('list_subscriptions tool', () => {
       const input = { status_filter: 'active' };
 
       const activeSubscriptions = createMockSubscriptions().filter(s => s.status === 'ACTIVE');
-      vi.mocked(prisma.subscription.findMany).mockResolvedValue(activeSubscriptions);
-      vi.mocked(prisma.subscription.count).mockResolvedValue(activeSubscriptions.length);
+      vi.mocked(prisma.dataSubscription.findMany).mockResolvedValue(activeSubscriptions as any);
+      vi.mocked(prisma.dataSubscription.count).mockResolvedValue(activeSubscriptions.length);
 
       const result = await executeListSubscriptions(input, context);
 
       expect(result.success).toBe(true);
-      expect(result.data?.subscriptions.every(s => s.status === 'ACTIVE')).toBe(true);
+      expect(result.data?.subscriptions.every(s => s.status === 'active')).toBe(true);
     });
 
     it('filters by paused status', async () => {
@@ -236,13 +263,13 @@ describe('list_subscriptions tool', () => {
       const input = { status_filter: 'paused' };
 
       const pausedSubscriptions = createMockSubscriptions().filter(s => s.status === 'PAUSED');
-      vi.mocked(prisma.subscription.findMany).mockResolvedValue(pausedSubscriptions);
-      vi.mocked(prisma.subscription.count).mockResolvedValue(pausedSubscriptions.length);
+      vi.mocked(prisma.dataSubscription.findMany).mockResolvedValue(pausedSubscriptions as any);
+      vi.mocked(prisma.dataSubscription.count).mockResolvedValue(pausedSubscriptions.length);
 
       const result = await executeListSubscriptions(input, context);
 
       expect(result.success).toBe(true);
-      expect(result.data?.subscriptions.every(s => s.status === 'PAUSED')).toBe(true);
+      expect(result.data?.subscriptions.every(s => s.status === 'paused')).toBe(true);
     });
 
     it('filters by cancelled status', async () => {
@@ -250,13 +277,13 @@ describe('list_subscriptions tool', () => {
       const input = { status_filter: 'cancelled' };
 
       const cancelledSubscriptions = createMockSubscriptions().filter(s => s.status === 'CANCELLED');
-      vi.mocked(prisma.subscription.findMany).mockResolvedValue(cancelledSubscriptions);
-      vi.mocked(prisma.subscription.count).mockResolvedValue(cancelledSubscriptions.length);
+      vi.mocked(prisma.dataSubscription.findMany).mockResolvedValue(cancelledSubscriptions as any);
+      vi.mocked(prisma.dataSubscription.count).mockResolvedValue(cancelledSubscriptions.length);
 
       const result = await executeListSubscriptions(input, context);
 
       expect(result.success).toBe(true);
-      expect(result.data?.subscriptions.every(s => s.status === 'CANCELLED')).toBe(true);
+      expect(result.data?.subscriptions.every(s => s.status === 'cancelled')).toBe(true);
     });
 
     it('returns all statuses when filter is "all"', async () => {
@@ -276,13 +303,13 @@ describe('list_subscriptions tool', () => {
       const input = { database_filter: 'nho' };
 
       const nhoSubscriptions = createMockSubscriptions().filter(s => s.database === 'NHO');
-      vi.mocked(prisma.subscription.findMany).mockResolvedValue(nhoSubscriptions);
-      vi.mocked(prisma.subscription.count).mockResolvedValue(nhoSubscriptions.length);
+      vi.mocked(prisma.dataSubscription.findMany).mockResolvedValue(nhoSubscriptions as any);
+      vi.mocked(prisma.dataSubscription.count).mockResolvedValue(nhoSubscriptions.length);
 
       const result = await executeListSubscriptions(input, context);
 
       expect(result.success).toBe(true);
-      expect(result.data?.subscriptions.every(s => s.database === 'NHO')).toBe(true);
+      expect(result.data?.subscriptions.every(s => s.database === 'nho')).toBe(true);
     });
 
     it('filters by new_mover database', async () => {
@@ -290,26 +317,26 @@ describe('list_subscriptions tool', () => {
       const input = { database_filter: 'new_mover' };
 
       const nmSubscriptions = createMockSubscriptions().filter(s => s.database === 'NEW_MOVER');
-      vi.mocked(prisma.subscription.findMany).mockResolvedValue(nmSubscriptions);
-      vi.mocked(prisma.subscription.count).mockResolvedValue(nmSubscriptions.length);
+      vi.mocked(prisma.dataSubscription.findMany).mockResolvedValue(nmSubscriptions as any);
+      vi.mocked(prisma.dataSubscription.count).mockResolvedValue(nmSubscriptions.length);
 
       const result = await executeListSubscriptions(input, context);
 
       expect(result.success).toBe(true);
-      expect(result.data?.subscriptions.every(s => s.database === 'NEW_MOVER')).toBe(true);
+      expect(result.data?.subscriptions.every(s => s.database === 'new_mover')).toBe(true);
     });
   });
 
   describe('client filtering', () => {
-    it('filters by client identifier', async () => {
+    it('filters by client name', async () => {
       const context = createTestContext();
-      const input = { client_filter: 'CA001' };
+      const input = { client_filter: 'Client A' };
 
       const clientSubscriptions = createMockSubscriptions().filter(
-        s => s.clientInfo?.identifier === 'CA001'
+        s => s.clientName === 'Client A'
       );
-      vi.mocked(prisma.subscription.findMany).mockResolvedValue(clientSubscriptions);
-      vi.mocked(prisma.subscription.count).mockResolvedValue(clientSubscriptions.length);
+      vi.mocked(prisma.dataSubscription.findMany).mockResolvedValue(clientSubscriptions as any);
+      vi.mocked(prisma.dataSubscription.count).mockResolvedValue(clientSubscriptions.length);
 
       const result = await executeListSubscriptions(input, context);
 
@@ -317,15 +344,15 @@ describe('list_subscriptions tool', () => {
       expect(result.data?.subscriptions).toHaveLength(2);
     });
 
-    it('filters by client name', async () => {
+    it('filters by partial client name', async () => {
       const context = createTestContext();
-      const input = { client_filter: 'Client A' };
+      const input = { client_filter: 'Client' };
 
       const clientSubscriptions = createMockSubscriptions().filter(
-        s => s.clientInfo?.name === 'Client A'
+        s => s.clientName?.includes('Client')
       );
-      vi.mocked(prisma.subscription.findMany).mockResolvedValue(clientSubscriptions);
-      vi.mocked(prisma.subscription.count).mockResolvedValue(clientSubscriptions.length);
+      vi.mocked(prisma.dataSubscription.findMany).mockResolvedValue(clientSubscriptions as any);
+      vi.mocked(prisma.dataSubscription.count).mockResolvedValue(clientSubscriptions.length);
 
       const result = await executeListSubscriptions(input, context);
 
@@ -340,7 +367,7 @@ describe('list_subscriptions tool', () => {
 
       const result = await executeListSubscriptions(input, context);
 
-      expect(prisma.subscription.findMany).toHaveBeenCalledWith(
+      expect(prisma.dataSubscription.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
           take: 2,
         })
@@ -353,7 +380,7 @@ describe('list_subscriptions tool', () => {
 
       const result = await executeListSubscriptions(input, context);
 
-      expect(prisma.subscription.findMany).toHaveBeenCalledWith(
+      expect(prisma.dataSubscription.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
           skip: 10,
         })
@@ -364,13 +391,16 @@ describe('list_subscriptions tool', () => {
       const context = createTestContext();
       const input = { limit: 2, offset: 0 };
 
+      // Only return 2 subscriptions to match the limit
+      vi.mocked(prisma.dataSubscription.findMany).mockResolvedValue(createMockSubscriptions().slice(0, 2) as any);
+
       const result = await executeListSubscriptions(input, context);
 
       expect(result.data?.pagination).toBeDefined();
       expect(result.data?.pagination?.limit).toBe(2);
       expect(result.data?.pagination?.offset).toBe(0);
       expect(result.data?.pagination?.total).toBe(4);
-      expect(result.data?.pagination?.has_more).toBe(true);
+      expect(result.data?.pagination?.hasMore).toBe(true);
     });
 
     it('indicates no more results when at end', async () => {
@@ -379,7 +409,7 @@ describe('list_subscriptions tool', () => {
 
       const result = await executeListSubscriptions(input, context);
 
-      expect(result.data?.pagination?.has_more).toBe(false);
+      expect(result.data?.pagination?.hasMore).toBe(false);
     });
 
     it('enforces maximum limit of 100', async () => {
@@ -395,7 +425,7 @@ describe('list_subscriptions tool', () => {
 
       const result = await executeListSubscriptions(input, context);
 
-      expect(prisma.subscription.findMany).toHaveBeenCalledWith(
+      expect(prisma.dataSubscription.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
           take: 50,
         })
@@ -407,6 +437,13 @@ describe('list_subscriptions tool', () => {
     it('returns summary counts', async () => {
       const context = createTestContext();
       const input = {};
+
+      // Setup mocks for count calls
+      vi.mocked(prisma.dataSubscription.count)
+        .mockResolvedValueOnce(4)  // total count
+        .mockResolvedValueOnce(2)  // active count
+        .mockResolvedValueOnce(1)  // paused count
+        .mockResolvedValueOnce(1); // cancelled count
 
       const result = await executeListSubscriptions(input, context);
 
@@ -420,6 +457,13 @@ describe('list_subscriptions tool', () => {
       const context = createTestContext();
       const input = {};
 
+      // Setup mocks for count calls
+      vi.mocked(prisma.dataSubscription.count)
+        .mockResolvedValueOnce(4)  // total count
+        .mockResolvedValueOnce(2)  // active count
+        .mockResolvedValueOnce(1)  // paused count
+        .mockResolvedValueOnce(1); // cancelled count
+
       const result = await executeListSubscriptions(input, context);
 
       expect(result.data?.summary?.active).toBe(2);
@@ -429,6 +473,13 @@ describe('list_subscriptions tool', () => {
       const context = createTestContext();
       const input = {};
 
+      // Setup mocks for count calls
+      vi.mocked(prisma.dataSubscription.count)
+        .mockResolvedValueOnce(4)  // total count
+        .mockResolvedValueOnce(2)  // active count
+        .mockResolvedValueOnce(1)  // paused count
+        .mockResolvedValueOnce(1); // cancelled count
+
       const result = await executeListSubscriptions(input, context);
 
       expect(result.data?.summary?.paused).toBe(1);
@@ -437,6 +488,13 @@ describe('list_subscriptions tool', () => {
     it('calculates correct cancelled count', async () => {
       const context = createTestContext();
       const input = {};
+
+      // Setup mocks for count calls
+      vi.mocked(prisma.dataSubscription.count)
+        .mockResolvedValueOnce(4)  // total count
+        .mockResolvedValueOnce(2)  // active count
+        .mockResolvedValueOnce(1)  // paused count
+        .mockResolvedValueOnce(1); // cancelled count
 
       const result = await executeListSubscriptions(input, context);
 
@@ -482,7 +540,7 @@ describe('list_subscriptions tool', () => {
 
       await executeListSubscriptions(input, context);
 
-      expect(prisma.subscription.findMany).toHaveBeenCalledWith(
+      expect(prisma.dataSubscription.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
           where: expect.objectContaining({
             tenantId: 'test-tenant-id',
@@ -492,15 +550,7 @@ describe('list_subscriptions tool', () => {
     });
   });
 
-  describe('null input handling', () => {
-    it('handles null input', async () => {
-      const context = createTestContext();
-
-      const result = await executeListSubscriptions(null, context);
-
-      expect(result.success).toBe(true);
-    });
-
+  describe('optional input handling', () => {
     it('handles undefined input', async () => {
       const context = createTestContext();
 
@@ -523,7 +573,7 @@ describe('list_subscriptions tool', () => {
       const context = createTestContext();
       const input = {};
 
-      vi.mocked(prisma.subscription.findMany).mockRejectedValue(new Error('Database error'));
+      vi.mocked(prisma.dataSubscription.findMany).mockRejectedValue(new Error('Database error'));
 
       await expect(executeListSubscriptions(input, context)).rejects.toThrow('Database error');
     });

@@ -5,16 +5,28 @@
 import { describe, it, expect } from 'vitest';
 import {
   AppError,
+  McpError,
   ValidationError,
   NotFoundError,
+  AuthenticationError,
   AuthorizationError,
   ExternalServiceError,
   RateLimitError,
-  ConflictError,
-  BadRequestError,
-  isAppError,
-  toHttpError,
-  errorHandler,
+  QuotaExceededError,
+  ConfigurationError,
+  DatabaseError,
+  PlatformSyncError,
+  PrintApiError,
+  BillingError,
+  SftpError,
+  TemplateError,
+  PdfGenerationError,
+  isMcpError,
+  formatError,
+  withErrorHandling,
+  safeApiCall,
+  getUserFriendlyMessage,
+  logError,
 } from '../../../src/utils/errors.js';
 
 describe('Custom Error Types', () => {
@@ -42,7 +54,7 @@ describe('Custom Error Types', () => {
     });
 
     it('supports details object', () => {
-      const error = new AppError('Detailed error', 'DETAILED', 500, {
+      const error = new AppError('Detailed error', 'DETAILED', 500, true, {
         field: 'email',
         reason: 'invalid format',
       });
@@ -54,15 +66,35 @@ describe('Custom Error Types', () => {
     });
 
     it('serializes to JSON correctly', () => {
-      const error = new AppError('JSON error', 'JSON_TEST', 400, { foo: 'bar' });
+      const error = new AppError('JSON error', 'JSON_TEST', 400, true, { foo: 'bar' });
       const json = error.toJSON();
 
       expect(json).toEqual({
-        error: 'JSON error',
-        code: 'JSON_TEST',
-        statusCode: 400,
-        details: { foo: 'bar' },
+        error: {
+          name: 'AppError',
+          code: 'JSON_TEST',
+          message: 'JSON error',
+          details: { foo: 'bar' },
+        },
       });
+    });
+
+    it('has isOperational flag', () => {
+      const opError = new AppError('Operational', 'OP_ERROR', 400, true);
+      const nonOpError = new AppError('Non-operational', 'NON_OP_ERROR', 500, false);
+
+      expect(opError.isOperational).toBe(true);
+      expect(nonOpError.isOperational).toBe(false);
+    });
+  });
+
+  describe('McpError', () => {
+    it('extends AppError', () => {
+      const error = new McpError('MCP error', 'MCP_CODE');
+
+      expect(error).toBeInstanceOf(AppError);
+      expect(error).toBeInstanceOf(McpError);
+      expect(error.name).toBe('McpError');
     });
   });
 
@@ -75,7 +107,7 @@ describe('Custom Error Types', () => {
       expect(error.statusCode).toBe(400);
     });
 
-    it('supports field-specific errors', () => {
+    it('supports field-specific errors in details', () => {
       const error = new ValidationError('Validation failed', {
         fields: {
           email: 'Invalid email format',
@@ -83,400 +115,330 @@ describe('Custom Error Types', () => {
         },
       });
 
-      expect(error.details.fields).toEqual({
+      expect(error.details?.fields).toEqual({
         email: 'Invalid email format',
         zip: 'Must be 5 digits',
       });
-    });
-
-    it('handles array of errors', () => {
-      const error = new ValidationError('Multiple errors', {
-        errors: [
-          { field: 'email', message: 'Required' },
-          { field: 'name', message: 'Too short' },
-        ],
-      });
-
-      expect(error.details.errors).toHaveLength(2);
-    });
-
-    it('works with Zod error format', () => {
-      const zodErrors = {
-        issues: [
-          { path: ['email'], message: 'Invalid email' },
-          { path: ['age'], message: 'Must be positive' },
-        ],
-      };
-
-      const error = ValidationError.fromZodError(zodErrors);
-
-      expect(error.code).toBe('VALIDATION_ERROR');
-      expect(error.details.errors).toBeDefined();
     });
   });
 
   describe('NotFoundError', () => {
     it('creates not found error with 404 status', () => {
-      const error = new NotFoundError('User not found');
+      const error = new NotFoundError('User');
 
       expect(error.message).toBe('User not found');
       expect(error.code).toBe('NOT_FOUND');
       expect(error.statusCode).toBe(404);
     });
 
-    it('supports resource type', () => {
-      const error = new NotFoundError('Record not found', {
-        resourceType: 'subscription',
-        resourceId: 'sub-123',
-      });
+    it('includes identifier in message', () => {
+      const error = new NotFoundError('Subscription', 'sub-123');
 
-      expect(error.details.resourceType).toBe('subscription');
-      expect(error.details.resourceId).toBe('sub-123');
+      expect(error.message).toBe("Subscription with identifier 'sub-123' not found");
+      expect(error.details?.resource).toBe('Subscription');
+      expect(error.details?.identifier).toBe('sub-123');
+    });
+  });
+
+  describe('AuthenticationError', () => {
+    it('creates authentication error with 401 status', () => {
+      const error = new AuthenticationError();
+
+      expect(error.message).toBe('Authentication required');
+      expect(error.code).toBe('AUTHENTICATION_ERROR');
+      expect(error.statusCode).toBe(401);
     });
 
-    it('provides factory method', () => {
-      const error = NotFoundError.forResource('Tenant', 'tenant-456');
+    it('allows custom message', () => {
+      const error = new AuthenticationError('Invalid API key');
 
-      expect(error.message).toBe('Tenant not found: tenant-456');
-      expect(error.details.resourceType).toBe('Tenant');
-      expect(error.details.resourceId).toBe('tenant-456');
+      expect(error.message).toBe('Invalid API key');
     });
   });
 
   describe('AuthorizationError', () => {
     it('creates authorization error with 403 status', () => {
-      const error = new AuthorizationError('Access denied');
+      const error = new AuthorizationError();
 
       expect(error.message).toBe('Access denied');
-      expect(error.code).toBe('FORBIDDEN');
+      expect(error.code).toBe('AUTHORIZATION_ERROR');
       expect(error.statusCode).toBe(403);
     });
 
-    it('supports action and resource', () => {
+    it('supports details about permission', () => {
       const error = new AuthorizationError('Not authorized', {
         action: 'delete',
         resource: 'subscription',
       });
 
-      expect(error.details.action).toBe('delete');
-      expect(error.details.resource).toBe('subscription');
-    });
-
-    it('creates authentication error with 401 status', () => {
-      const error = AuthorizationError.unauthenticated('Invalid API key');
-
-      expect(error.message).toBe('Invalid API key');
-      expect(error.code).toBe('UNAUTHORIZED');
-      expect(error.statusCode).toBe(401);
-    });
-
-    it('creates permission error', () => {
-      const error = AuthorizationError.insufficientPermissions('admin', 'templates');
-
-      expect(error.message).toContain('admin');
-      expect(error.details.requiredRole).toBe('admin');
+      expect(error.details?.action).toBe('delete');
+      expect(error.details?.resource).toBe('subscription');
     });
   });
 
   describe('ExternalServiceError', () => {
     it('creates external service error with 502 status', () => {
-      const error = new ExternalServiceError('Stripe API failed');
+      const error = new ExternalServiceError('Stripe');
 
-      expect(error.message).toBe('Stripe API failed');
+      expect(error.message).toBe('External service error: Stripe');
       expect(error.code).toBe('EXTERNAL_SERVICE_ERROR');
       expect(error.statusCode).toBe(502);
     });
 
-    it('identifies service and operation', () => {
-      const error = new ExternalServiceError('API call failed', {
-        service: 'stripe',
-        operation: 'createPaymentIntent',
-        originalError: 'Card declined',
-      });
+    it('includes original error message', () => {
+      const originalError = new Error('Connection timeout');
+      const error = new ExternalServiceError('HubSpot', originalError);
 
-      expect(error.details.service).toBe('stripe');
-      expect(error.details.operation).toBe('createPaymentIntent');
-      expect(error.details.originalError).toBe('Card declined');
-    });
-
-    it('supports timeout errors', () => {
-      const error = ExternalServiceError.timeout('HubSpot', 30000);
-
-      expect(error.message).toContain('HubSpot');
-      expect(error.message).toContain('timeout');
-      expect(error.details.timeoutMs).toBe(30000);
-    });
-
-    it('supports connection errors', () => {
-      const error = ExternalServiceError.connectionFailed('Mailchimp');
-
-      expect(error.message).toContain('Mailchimp');
-      expect(error.details.service).toBe('Mailchimp');
-    });
-
-    it('wraps unknown errors', () => {
-      const originalError = new Error('Something broke');
-      const error = ExternalServiceError.wrap(originalError, 'SFTP');
-
-      expect(error.details.service).toBe('SFTP');
-      expect(error.details.originalError).toBe('Something broke');
+      expect(error.details?.originalMessage).toBe('Connection timeout');
     });
   });
 
   describe('RateLimitError', () => {
     it('creates rate limit error with 429 status', () => {
-      const error = new RateLimitError('Too many requests');
+      const error = new RateLimitError();
 
-      expect(error.message).toBe('Too many requests');
-      expect(error.code).toBe('RATE_LIMITED');
+      expect(error.message).toContain('Rate limit exceeded');
+      expect(error.code).toBe('RATE_LIMIT_EXCEEDED');
       expect(error.statusCode).toBe(429);
     });
 
     it('includes retry information', () => {
-      const error = new RateLimitError('Rate limit exceeded', {
-        retryAfterMs: 60000,
-        limit: 100,
-        remaining: 0,
-      });
+      const error = new RateLimitError(30);
 
-      expect(error.details.retryAfterMs).toBe(60000);
-      expect(error.details.limit).toBe(100);
-      expect(error.details.remaining).toBe(0);
-    });
-
-    it('calculates retry-after header', () => {
-      const error = new RateLimitError('Rate limited', {
-        retryAfterMs: 30000,
-      });
-
-      expect(error.retryAfterSeconds).toBe(30);
+      expect(error.retryAfter).toBe(30);
+      expect(error.details?.retryAfter).toBe(30);
     });
   });
 
-  describe('ConflictError', () => {
-    it('creates conflict error with 409 status', () => {
-      const error = new ConflictError('Resource already exists');
+  describe('QuotaExceededError', () => {
+    it('creates quota exceeded error with 402 status', () => {
+      const error = new QuotaExceededError('Monthly records', 5000, 5000);
 
-      expect(error.message).toBe('Resource already exists');
-      expect(error.code).toBe('CONFLICT');
-      expect(error.statusCode).toBe(409);
-    });
-
-    it('identifies conflicting resource', () => {
-      const error = new ConflictError('Duplicate email', {
-        field: 'email',
-        value: 'test@example.com',
-      });
-
-      expect(error.details.field).toBe('email');
-      expect(error.details.value).toBe('test@example.com');
+      expect(error.code).toBe('QUOTA_EXCEEDED');
+      expect(error.statusCode).toBe(402);
+      expect(error.message).toContain('Monthly records');
+      expect(error.message).toContain('5000/5000');
     });
   });
 
-  describe('BadRequestError', () => {
-    it('creates bad request error with 400 status', () => {
-      const error = new BadRequestError('Invalid request');
+  describe('ConfigurationError', () => {
+    it('creates configuration error with 500 status', () => {
+      const error = new ConfigurationError('Missing API key');
 
-      expect(error.message).toBe('Invalid request');
-      expect(error.code).toBe('BAD_REQUEST');
+      expect(error.code).toBe('CONFIGURATION_ERROR');
+      expect(error.statusCode).toBe(500);
+      expect(error.message).toBe('Missing API key');
+    });
+  });
+
+  describe('DatabaseError', () => {
+    it('creates database error with 500 status', () => {
+      const error = new DatabaseError('Connection failed');
+
+      expect(error.code).toBe('DATABASE_ERROR');
+      expect(error.statusCode).toBe(500);
+      expect(error.message).toContain('Database error');
+    });
+  });
+
+  describe('PlatformSyncError', () => {
+    it('creates platform sync error with 502 status', () => {
+      const error = new PlatformSyncError('Mailchimp', 'Audience sync failed');
+
+      expect(error.code).toBe('PLATFORM_SYNC_ERROR');
+      expect(error.statusCode).toBe(502);
+      expect(error.message).toContain('Mailchimp');
+      expect(error.details?.platform).toBe('Mailchimp');
+    });
+  });
+
+  describe('PrintApiError', () => {
+    it('creates print API error with 502 status', () => {
+      const error = new PrintApiError('ReminderMedia', 'Job submission failed');
+
+      expect(error.code).toBe('PRINT_API_ERROR');
+      expect(error.statusCode).toBe(502);
+      expect(error.details?.provider).toBe('ReminderMedia');
+    });
+  });
+
+  describe('BillingError', () => {
+    it('creates billing error with 402 status', () => {
+      const error = new BillingError('Payment failed');
+
+      expect(error.code).toBe('BILLING_ERROR');
+      expect(error.statusCode).toBe(402);
+    });
+  });
+
+  describe('SftpError', () => {
+    it('creates SFTP error with 502 status', () => {
+      const error = new SftpError('Connection timeout');
+
+      expect(error.code).toBe('SFTP_ERROR');
+      expect(error.statusCode).toBe(502);
+      expect(error.message).toContain('SFTP error');
+    });
+  });
+
+  describe('TemplateError', () => {
+    it('creates template error with 400 status', () => {
+      const error = new TemplateError('Invalid template format');
+
+      expect(error.code).toBe('TEMPLATE_ERROR');
       expect(error.statusCode).toBe(400);
     });
   });
 
-  describe('isAppError', () => {
-    it('returns true for AppError instances', () => {
-      expect(isAppError(new AppError('test', 'TEST'))).toBe(true);
-      expect(isAppError(new ValidationError('test'))).toBe(true);
-      expect(isAppError(new NotFoundError('test'))).toBe(true);
-      expect(isAppError(new AuthorizationError('test'))).toBe(true);
+  describe('PdfGenerationError', () => {
+    it('creates PDF generation error with 500 status', () => {
+      const error = new PdfGenerationError('Rendering failed');
+
+      expect(error.code).toBe('PDF_GENERATION_ERROR');
+      expect(error.statusCode).toBe(500);
+    });
+  });
+
+  describe('isMcpError', () => {
+    it('returns true for McpError and subclasses', () => {
+      expect(isMcpError(new McpError('test', 'TEST'))).toBe(true);
+      expect(isMcpError(new ValidationError('test'))).toBe(true);
+      expect(isMcpError(new NotFoundError('test'))).toBe(true);
+      expect(isMcpError(new AuthorizationError())).toBe(true);
+      expect(isMcpError(new AuthenticationError())).toBe(true);
     });
 
     it('returns false for regular errors', () => {
-      expect(isAppError(new Error('test'))).toBe(false);
-      expect(isAppError(new TypeError('test'))).toBe(false);
+      expect(isMcpError(new Error('test'))).toBe(false);
+      expect(isMcpError(new TypeError('test'))).toBe(false);
     });
 
     it('returns false for non-errors', () => {
-      expect(isAppError(null)).toBe(false);
-      expect(isAppError(undefined)).toBe(false);
-      expect(isAppError('error')).toBe(false);
-      expect(isAppError({ message: 'error' })).toBe(false);
+      expect(isMcpError(null)).toBe(false);
+      expect(isMcpError(undefined)).toBe(false);
+      expect(isMcpError('error')).toBe(false);
+      expect(isMcpError({ message: 'error' })).toBe(false);
     });
   });
 
-  describe('toHttpError', () => {
-    it('converts AppError to HTTP response', () => {
+  describe('formatError', () => {
+    it('formats McpError correctly', () => {
       const error = new ValidationError('Invalid email', { field: 'email' });
-      const httpError = toHttpError(error);
-
-      expect(httpError).toEqual({
-        status: 400,
-        body: {
-          error: 'Invalid email',
-          code: 'VALIDATION_ERROR',
-          details: { field: 'email' },
-        },
-      });
-    });
-
-    it('converts regular error to 500 response', () => {
-      const error = new Error('Unknown error');
-      const httpError = toHttpError(error);
-
-      expect(httpError.status).toBe(500);
-      expect(httpError.body.error).toBe('Internal server error');
-      expect(httpError.body.code).toBe('INTERNAL_ERROR');
-    });
-
-    it('hides error details in production', () => {
-      const originalEnv = process.env.NODE_ENV;
-      process.env.NODE_ENV = 'production';
-
-      const error = new Error('Secret database error');
-      const httpError = toHttpError(error);
-
-      expect(httpError.body.error).toBe('Internal server error');
-      expect(httpError.body.details).toBeUndefined();
-
-      process.env.NODE_ENV = originalEnv;
-    });
-
-    it('exposes error details in development', () => {
-      const originalEnv = process.env.NODE_ENV;
-      process.env.NODE_ENV = 'development';
-
-      const error = new Error('Database connection failed');
-      const httpError = toHttpError(error);
-
-      expect(httpError.body.details?.originalMessage).toBe('Database connection failed');
-
-      process.env.NODE_ENV = originalEnv;
-    });
-  });
-
-  describe('errorHandler', () => {
-    it('handles ValidationError', () => {
-      const error = new ValidationError('Bad input');
-      const result = errorHandler(error);
-
-      expect(result.statusCode).toBe(400);
-      expect(result.body.code).toBe('VALIDATION_ERROR');
-    });
-
-    it('handles NotFoundError', () => {
-      const error = new NotFoundError('Not found');
-      const result = errorHandler(error);
-
-      expect(result.statusCode).toBe(404);
-      expect(result.body.code).toBe('NOT_FOUND');
-    });
-
-    it('handles AuthorizationError', () => {
-      const error = new AuthorizationError('Forbidden');
-      const result = errorHandler(error);
-
-      expect(result.statusCode).toBe(403);
-      expect(result.body.code).toBe('FORBIDDEN');
-    });
-
-    it('handles ExternalServiceError', () => {
-      const error = new ExternalServiceError('Service unavailable');
-      const result = errorHandler(error);
-
-      expect(result.statusCode).toBe(502);
-      expect(result.body.code).toBe('EXTERNAL_SERVICE_ERROR');
-    });
-
-    it('handles RateLimitError', () => {
-      const error = new RateLimitError('Too many requests', {
-        retryAfterMs: 60000,
-      });
-      const result = errorHandler(error);
-
-      expect(result.statusCode).toBe(429);
-      expect(result.headers?.['Retry-After']).toBe('60');
-    });
-
-    it('handles unknown errors', () => {
-      const error = new Error('Something unexpected');
-      const result = errorHandler(error);
-
-      expect(result.statusCode).toBe(500);
-      expect(result.body.code).toBe('INTERNAL_ERROR');
-    });
-
-    it('handles null/undefined', () => {
-      const result1 = errorHandler(null);
-      const result2 = errorHandler(undefined);
-
-      expect(result1.statusCode).toBe(500);
-      expect(result2.statusCode).toBe(500);
-    });
-
-    it('handles string errors', () => {
-      const result = errorHandler('String error message');
-
-      expect(result.statusCode).toBe(500);
-      expect(result.body.error).toBe('Internal server error');
-    });
-  });
-
-  describe('Error chaining', () => {
-    it('supports cause for error chaining', () => {
-      const originalError = new Error('Database connection failed');
-      const error = new ExternalServiceError('Failed to fetch data', {
-        service: 'database',
-        cause: originalError,
-      });
-
-      expect(error.cause).toBe(originalError);
-    });
-
-    it('unwraps nested errors', () => {
-      const dbError = new Error('Connection timeout');
-      const serviceError = new ExternalServiceError('Service failed', {
-        service: 'postgres',
-        cause: dbError,
-      });
-      const appError = new AppError('Request failed', 'REQUEST_FAILED', 500, {
-        cause: serviceError,
-      });
-
-      expect(appError.getRootCause()).toBe(dbError);
-    });
-  });
-
-  describe('Error formatting', () => {
-    it('formats error for logging', () => {
-      const error = new ValidationError('Invalid input', {
-        fields: { email: 'required' },
-      });
-
-      const formatted = error.toLogFormat();
+      const formatted = formatError(error);
 
       expect(formatted).toEqual({
-        name: 'ValidationError',
-        message: 'Invalid input',
         code: 'VALIDATION_ERROR',
-        statusCode: 400,
-        details: { fields: { email: 'required' } },
-        stack: expect.any(String),
+        message: 'Invalid email',
+        details: { field: 'email' },
       });
     });
 
-    it('formats error for client response', () => {
-      const error = new NotFoundError('User not found', {
-        resourceId: 'user-123',
-      });
+    it('formats regular Error', () => {
+      const error = new Error('Something broke');
+      const formatted = formatError(error);
 
-      const clientFormat = error.toClientFormat();
-
-      expect(clientFormat).toEqual({
-        error: 'User not found',
-        code: 'NOT_FOUND',
+      expect(formatted).toEqual({
+        code: 'INTERNAL_ERROR',
+        message: 'Something broke',
       });
-      // Should not include internal details
-      expect(clientFormat.details).toBeUndefined();
+    });
+
+    it('formats non-Error objects', () => {
+      const formatted = formatError('String error');
+
+      expect(formatted).toEqual({
+        code: 'UNKNOWN_ERROR',
+        message: 'String error',
+      });
+    });
+  });
+
+  describe('withErrorHandling', () => {
+    it('passes through successful results', async () => {
+      const fn = async () => 'success';
+      const wrapped = withErrorHandling(fn, 'test');
+
+      const result = await wrapped();
+      expect(result).toBe('success');
+    });
+
+    it('re-throws McpError as-is', async () => {
+      const error = new ValidationError('Bad input');
+      const fn = async () => {
+        throw error;
+      };
+      const wrapped = withErrorHandling(fn, 'test');
+
+      await expect(wrapped()).rejects.toThrow(ValidationError);
+    });
+
+    it('wraps regular errors in McpError', async () => {
+      const fn = async () => {
+        throw new Error('Something broke');
+      };
+      const wrapped = withErrorHandling(fn, 'test');
+
+      await expect(wrapped()).rejects.toThrow(McpError);
+    });
+  });
+
+  describe('safeApiCall', () => {
+    it('returns result on success', async () => {
+      const result = await safeApiCall('TestService', 'fetchData', async () => 'data');
+
+      expect(result).toBe('data');
+    });
+
+    it('throws ExternalServiceError on failure', async () => {
+      await expect(
+        safeApiCall('TestService', 'fetchData', async () => {
+          throw new Error('Network error');
+        })
+      ).rejects.toThrow(ExternalServiceError);
+    });
+
+    it('re-throws McpError as-is', async () => {
+      await expect(
+        safeApiCall('TestService', 'fetchData', async () => {
+          throw new ValidationError('Bad input');
+        })
+      ).rejects.toThrow(ValidationError);
+    });
+  });
+
+  describe('getUserFriendlyMessage', () => {
+    it('returns friendly message for known error codes', () => {
+      expect(getUserFriendlyMessage(new AuthenticationError())).toContain('API key');
+      expect(getUserFriendlyMessage(new AuthorizationError())).toContain('permission');
+      expect(getUserFriendlyMessage(new RateLimitError())).toContain('wait');
+      expect(getUserFriendlyMessage(new QuotaExceededError('test', 1, 1))).toContain('quota');
+    });
+
+    it('returns ValidationError message directly', () => {
+      const error = new ValidationError('Email is invalid');
+      expect(getUserFriendlyMessage(error)).toBe('Email is invalid');
+    });
+
+    it('returns generic message for unknown errors', () => {
+      const message = getUserFriendlyMessage(new Error('Internal error'));
+      expect(message).toContain('unexpected error');
+    });
+  });
+
+  describe('logError', () => {
+    it('logs error with context', () => {
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      const error = new ValidationError('Test error');
+      logError('TestContext', error, { userId: '123' });
+
+      expect(consoleSpy).toHaveBeenCalled();
+      const loggedData = JSON.parse(consoleSpy.mock.calls[0][0]);
+      expect(loggedData.context).toBe('TestContext');
+      expect(loggedData.code).toBe('VALIDATION_ERROR');
+      expect(loggedData.userId).toBe('123');
+
+      consoleSpy.mockRestore();
     });
   });
 });

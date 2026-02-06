@@ -1,0 +1,516 @@
+/**
+ * Tests for get_recommendations tool
+ */
+
+import { describe, it, expect } from 'vitest';
+import type { TenantContext } from '../../../../src/utils/auth.js';
+import { executeGetRecommendations } from '../../../../src/tools/discovery/get-recommendations.js';
+
+function createTestContext(overrides: Partial<TenantContext> = {}): TenantContext {
+  return {
+    tenant: {
+      id: 'test-tenant-id',
+      name: 'Test Tenant',
+      email: 'test@example.com',
+      company: 'Test Company',
+      phone: null,
+      status: 'ACTIVE',
+      stripeCustomerId: null,
+      parentTenantId: null,
+      isReseller: false,
+      wholesalePricing: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    },
+    apiKey: {
+      id: 'test-api-key-id',
+      key: 'test-key',
+      name: 'Test Key',
+      tenantId: 'test-tenant-id',
+      permissions: ['*'],
+      isActive: true,
+      lastUsedAt: null,
+      expiresAt: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    },
+    subscription: null,
+    permissions: ['*'],
+    ...overrides,
+  };
+}
+
+describe('get_recommendations tool', () => {
+  const context = createTestContext();
+
+  describe('valid inputs', () => {
+    it('returns success for valid input', async () => {
+      const input = {
+        industry: 'realtor',
+        role: 'business_owner',
+        goals: ['find_new_customers'],
+      };
+
+      const result = await executeGetRecommendations(input, context);
+
+      expect(result.success).toBe(true);
+      expect(result.data).toBeDefined();
+    });
+
+    it('returns all expected sections', async () => {
+      const input = {
+        industry: 'hvac',
+        role: 'sales_marketing',
+        goals: ['find_new_customers', 'direct_mail'],
+      };
+
+      const result = await executeGetRecommendations(input, context);
+
+      expect(result.data.welcome_message).toBeDefined();
+      expect(result.data.your_profile).toBeDefined();
+      expect(result.data.recommended_workflows).toBeDefined();
+      expect(result.data.quick_wins).toBeDefined();
+      expect(result.data.available_categories).toBeDefined();
+      expect(result.data.next_step).toBeDefined();
+    });
+  });
+
+  describe('profile display', () => {
+    it('maps industry to display name', async () => {
+      const input = {
+        industry: 'realtor',
+        role: 'business_owner',
+        goals: ['find_new_customers'],
+      };
+
+      const result = await executeGetRecommendations(input, context);
+
+      expect(result.data.your_profile.industry).toBe('Real Estate');
+    });
+
+    it('maps role to display name', async () => {
+      const input = {
+        industry: 'hvac',
+        role: 'sales_marketing',
+        goals: ['direct_mail'],
+      };
+
+      const result = await executeGetRecommendations(input, context);
+
+      expect(result.data.your_profile.role).toBe('Sales & Marketing');
+    });
+
+    it('maps goals to display names', async () => {
+      const input = {
+        industry: 'insurance',
+        role: 'business_owner',
+        goals: ['find_new_customers', 'email_campaigns'],
+      };
+
+      const result = await executeGetRecommendations(input, context);
+
+      expect(result.data.your_profile.goals).toContain('Find New Customers');
+      expect(result.data.your_profile.goals).toContain('Email Campaigns');
+    });
+
+    it('includes welcome message with industry and role', async () => {
+      const input = {
+        industry: 'landscaping',
+        role: 'business_owner',
+        goals: ['direct_mail'],
+      };
+
+      const result = await executeGetRecommendations(input, context);
+
+      expect(result.data.welcome_message).toContain('Business Owner');
+      expect(result.data.welcome_message).toContain('Landscaping');
+    });
+  });
+
+  describe('workflow filtering', () => {
+    it('returns realtor workflows for realtor + find_new_customers', async () => {
+      const input = {
+        industry: 'realtor',
+        role: 'business_owner',
+        goals: ['find_new_customers'],
+      };
+
+      const result = await executeGetRecommendations(input, context);
+
+      const workflowNames = result.data.recommended_workflows.map((w) => w.name);
+      expect(workflowNames).toContain('New Homeowner Direct Mail Campaign');
+      expect(workflowNames).toContain('New Mover Welcome Campaign');
+    });
+
+    it('includes email workflow when email_campaigns is a goal', async () => {
+      const input = {
+        industry: 'insurance',
+        role: 'sales_marketing',
+        goals: ['email_campaigns'],
+      };
+
+      const result = await executeGetRecommendations(input, context);
+
+      const workflowNames = result.data.recommended_workflows.map((w) => w.name);
+      expect(workflowNames).toContain('Email Campaign to Purchased Lists');
+    });
+
+    it('includes intent workflow when intent_data is a goal', async () => {
+      const input = {
+        industry: 'hvac',
+        role: 'business_owner',
+        goals: ['intent_data'],
+      };
+
+      const result = await executeGetRecommendations(input, context);
+
+      const workflowNames = result.data.recommended_workflows.map((w) => w.name);
+      expect(workflowNames).toContain('Intent-Based Prospecting');
+    });
+
+    it('filters workflows by industry match', async () => {
+      const input = {
+        industry: 'retail',
+        role: 'business_owner',
+        goals: ['find_new_customers', 'direct_mail'],
+      };
+
+      const result = await executeGetRecommendations(input, context);
+
+      // Retail should get new mover but not new homeowner postcards
+      // (new_homeowner_postcards doesn't include retail in its industries)
+      const workflowNames = result.data.recommended_workflows.map((w) => w.name);
+      expect(workflowNames).toContain('New Mover Welcome Campaign');
+    });
+
+    it('includes agency workflow only for marketing_agency', async () => {
+      const input = {
+        industry: 'marketing_agency',
+        role: 'agency_reseller',
+        goals: ['automated_delivery'],
+      };
+
+      const result = await executeGetRecommendations(input, context);
+
+      const workflowNames = result.data.recommended_workflows.map((w) => w.name);
+      expect(workflowNames).toContain('Agency/Reseller Multi-Client Setup');
+    });
+
+    it('does not include agency workflow for non-agency industries', async () => {
+      const input = {
+        industry: 'hvac',
+        role: 'business_owner',
+        goals: ['automated_delivery'],
+      };
+
+      const result = await executeGetRecommendations(input, context);
+
+      const workflowNames = result.data.recommended_workflows.map((w) => w.name);
+      expect(workflowNames).not.toContain('Agency/Reseller Multi-Client Setup');
+    });
+
+    it('sorts workflows by goal relevance', async () => {
+      const input = {
+        industry: 'insurance',
+        role: 'sales_marketing',
+        goals: ['find_new_customers', 'email_campaigns'],
+      };
+
+      const result = await executeGetRecommendations(input, context);
+
+      // Workflows matching more goals should appear first
+      expect(result.data.recommended_workflows.length).toBeGreaterThan(0);
+    });
+  });
+
+  describe('include_examples flag', () => {
+    it('includes step details when include_examples is true', async () => {
+      const input = {
+        industry: 'realtor',
+        role: 'business_owner',
+        goals: ['find_new_customers'],
+        include_examples: true,
+      };
+
+      const result = await executeGetRecommendations(input, context);
+
+      const firstWorkflow = result.data.recommended_workflows[0];
+      expect(firstWorkflow.steps.length).toBeGreaterThan(0);
+      expect(firstWorkflow.steps[0].tool).toBeDefined();
+      expect(firstWorkflow.steps[0].action).toBeDefined();
+    });
+
+    it('omits step details when include_examples is false', async () => {
+      const input = {
+        industry: 'realtor',
+        role: 'business_owner',
+        goals: ['find_new_customers'],
+        include_examples: false,
+      };
+
+      const result = await executeGetRecommendations(input, context);
+
+      const firstWorkflow = result.data.recommended_workflows[0];
+      expect(firstWorkflow.steps).toEqual([]);
+    });
+
+    it('defaults to include_examples true', async () => {
+      const input = {
+        industry: 'realtor',
+        role: 'business_owner',
+        goals: ['find_new_customers'],
+      };
+
+      const result = await executeGetRecommendations(input, context);
+
+      const firstWorkflow = result.data.recommended_workflows[0];
+      expect(firstWorkflow.steps.length).toBeGreaterThan(0);
+    });
+  });
+
+  describe('quick wins', () => {
+    it('returns quick wins matching role and goals', async () => {
+      const input = {
+        industry: 'hvac',
+        role: 'business_owner',
+        goals: ['find_new_customers'],
+      };
+
+      const result = await executeGetRecommendations(input, context);
+
+      expect(result.data.quick_wins.length).toBeGreaterThan(0);
+      expect(result.data.quick_wins[0].tool).toBeDefined();
+      expect(result.data.quick_wins[0].description).toBeDefined();
+      expect(result.data.quick_wins[0].why).toBeDefined();
+    });
+
+    it('returns max 4 quick wins', async () => {
+      const input = {
+        industry: 'realtor',
+        role: 'business_owner',
+        goals: ['find_new_customers', 'direct_mail', 'email_campaigns', 'data_enrichment'],
+      };
+
+      const result = await executeGetRecommendations(input, context);
+
+      expect(result.data.quick_wins.length).toBeLessThanOrEqual(4);
+    });
+
+    it('includes developer-relevant quick wins for developer role', async () => {
+      const input = {
+        industry: 'other',
+        role: 'developer',
+        goals: ['data_enrichment'],
+      };
+
+      const result = await executeGetRecommendations(input, context);
+
+      const tools = result.data.quick_wins.map((qw) => qw.tool);
+      expect(tools).toContain('get_sample_data');
+    });
+  });
+
+  describe('category relevance scoring', () => {
+    it('marks matching categories as high relevance', async () => {
+      const input = {
+        industry: 'realtor',
+        role: 'business_owner',
+        goals: ['direct_mail'],
+      };
+
+      const result = await executeGetRecommendations(input, context);
+
+      const directMailCat = result.data.available_categories.find(
+        (c) => c.category === 'Direct Mail & Postcards'
+      );
+      expect(directMailCat?.relevance).toBe('high');
+    });
+
+    it('sorts categories by relevance (high first)', async () => {
+      const input = {
+        industry: 'insurance',
+        role: 'sales_marketing',
+        goals: ['find_new_customers'],
+      };
+
+      const result = await executeGetRecommendations(input, context);
+
+      const relevances = result.data.available_categories.map((c) => c.relevance);
+      const relevanceOrder = { high: 0, medium: 1, low: 2 };
+      for (let i = 1; i < relevances.length; i++) {
+        expect(relevanceOrder[relevances[i]]).toBeGreaterThanOrEqual(
+          relevanceOrder[relevances[i - 1]]
+        );
+      }
+    });
+
+    it('includes all categories regardless of relevance', async () => {
+      const input = {
+        industry: 'hvac',
+        role: 'business_owner',
+        goals: ['direct_mail'],
+      };
+
+      const result = await executeGetRecommendations(input, context);
+
+      // Should have all 10 categories
+      expect(result.data.available_categories.length).toBe(10);
+    });
+  });
+
+  describe('next step recommendation', () => {
+    it('always includes a next_step', async () => {
+      const input = {
+        industry: 'other',
+        role: 'business_owner',
+        goals: ['find_new_customers'],
+      };
+
+      const result = await executeGetRecommendations(input, context);
+
+      expect(result.data.next_step.tool).toBeDefined();
+      expect(result.data.next_step.prompt).toBeDefined();
+      expect(result.data.next_step.prompt.length).toBeGreaterThan(0);
+    });
+
+    it('suggests preview_count for direct_mail goal', async () => {
+      const input = {
+        industry: 'realtor',
+        role: 'business_owner',
+        goals: ['direct_mail'],
+      };
+
+      const result = await executeGetRecommendations(input, context);
+
+      expect(result.data.next_step.tool).toBe('preview_count');
+    });
+
+    it('suggests configure_email_account for email_campaigns goal', async () => {
+      const input = {
+        industry: 'insurance',
+        role: 'sales_marketing',
+        goals: ['email_campaigns'],
+      };
+
+      const result = await executeGetRecommendations(input, context);
+
+      expect(result.data.next_step.tool).toBe('configure_email_account');
+    });
+
+    it('suggests list_intent_categories for intent_data goal', async () => {
+      const input = {
+        industry: 'hvac',
+        role: 'business_owner',
+        goals: ['intent_data'],
+      };
+
+      const result = await executeGetRecommendations(input, context);
+
+      expect(result.data.next_step.tool).toBe('list_intent_categories');
+    });
+
+    it('suggests get_sample_data for developer role as fallback', async () => {
+      const input = {
+        industry: 'other',
+        role: 'developer',
+        goals: ['find_new_customers'],
+      };
+
+      const result = await executeGetRecommendations(input, context);
+
+      expect(result.data.next_step.tool).toBe('get_sample_data');
+    });
+
+    it('suggests get_pricing for agency_reseller role as fallback', async () => {
+      const input = {
+        industry: 'marketing_agency',
+        role: 'agency_reseller',
+        goals: ['find_new_customers'],
+      };
+
+      const result = await executeGetRecommendations(input, context);
+
+      expect(result.data.next_step.tool).toBe('get_pricing');
+    });
+
+    it('suggests configure_platform_connection for crm_sync goal', async () => {
+      const input = {
+        industry: 'realtor',
+        role: 'sales_marketing',
+        goals: ['crm_sync'],
+      };
+
+      const result = await executeGetRecommendations(input, context);
+
+      expect(result.data.next_step.tool).toBe('configure_platform_connection');
+    });
+  });
+
+  describe('input validation', () => {
+    it('throws error for invalid industry', async () => {
+      const input = {
+        industry: 'invalid_industry',
+        role: 'business_owner',
+        goals: ['find_new_customers'],
+      };
+
+      await expect(executeGetRecommendations(input, context)).rejects.toThrow();
+    });
+
+    it('throws error for invalid role', async () => {
+      const input = {
+        industry: 'realtor',
+        role: 'invalid_role',
+        goals: ['find_new_customers'],
+      };
+
+      await expect(executeGetRecommendations(input, context)).rejects.toThrow();
+    });
+
+    it('throws error for invalid goal', async () => {
+      const input = {
+        industry: 'realtor',
+        role: 'business_owner',
+        goals: ['invalid_goal'],
+      };
+
+      await expect(executeGetRecommendations(input, context)).rejects.toThrow();
+    });
+
+    it('throws error for empty goals array', async () => {
+      const input = {
+        industry: 'realtor',
+        role: 'business_owner',
+        goals: [],
+      };
+
+      await expect(executeGetRecommendations(input, context)).rejects.toThrow();
+    });
+
+    it('throws error for missing required fields', async () => {
+      const input = {
+        industry: 'realtor',
+      };
+
+      await expect(executeGetRecommendations(input, context)).rejects.toThrow();
+    });
+  });
+
+  describe('no permission check required', () => {
+    it('works with any permission set (info tool)', async () => {
+      const restrictedContext = createTestContext({
+        permissions: ['data:read'],
+      });
+
+      const input = {
+        industry: 'hvac',
+        role: 'business_owner',
+        goals: ['find_new_customers'],
+      };
+
+      const result = await executeGetRecommendations(input, restrictedContext);
+
+      expect(result.success).toBe(true);
+    });
+  });
+});

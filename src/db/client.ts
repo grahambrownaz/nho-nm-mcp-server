@@ -1,9 +1,12 @@
 /**
  * Prisma Database Client Singleton
  * Ensures a single database connection is reused across the application
+ *
+ * When DEMO_MODE=true, uses an in-memory mock client instead of PostgreSQL.
  */
 
 import { PrismaClient } from '@prisma/client';
+import { getMockPrismaClient } from './mock-prisma.js';
 
 // Declare global type for the Prisma client singleton
 declare global {
@@ -11,10 +14,17 @@ declare global {
   var __prisma: PrismaClient | undefined;
 }
 
+const isDemoMode = process.env.DEMO_MODE === 'true';
+
 /**
  * Create a new Prisma client with logging configuration
  */
 function createPrismaClient(): PrismaClient {
+  if (isDemoMode) {
+    console.log('[Demo Mode] Using in-memory mock database — no PostgreSQL required');
+    return getMockPrismaClient() as unknown as PrismaClient;
+  }
+
   const client = new PrismaClient({
     log:
       process.env.NODE_ENV === 'development'
@@ -29,6 +39,7 @@ function createPrismaClient(): PrismaClient {
  * Singleton Prisma client instance
  * In development, we store it on the global object to survive hot reloads
  * In production, we create a single instance
+ * In demo mode, uses in-memory mock
  */
 export const prisma: PrismaClient = global.__prisma ?? createPrismaClient();
 

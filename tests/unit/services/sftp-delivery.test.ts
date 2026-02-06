@@ -3,237 +3,62 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { SftpDeliveryService, sftpDeliveryService } from '../../../src/services/sftp-delivery.js';
+import { SftpDeliveryService, getSftpDeliveryService, type SftpConfig } from '../../../src/services/sftp-delivery.js';
 import SftpClient from 'ssh2-sftp-client';
 
 // Mock ssh2-sftp-client
-vi.mock('ssh2-sftp-client', () => {
-  const mockSftp = {
-    connect: vi.fn().mockResolvedValue(undefined),
-    end: vi.fn().mockResolvedValue(undefined),
-    put: vi.fn().mockResolvedValue(undefined),
-    mkdir: vi.fn().mockResolvedValue(undefined),
-    exists: vi.fn().mockResolvedValue(true),
-    stat: vi.fn().mockResolvedValue({ size: 12345, isDirectory: false }),
-    list: vi.fn().mockResolvedValue([]),
-  };
+const mockSftpClient = {
+  connect: vi.fn().mockResolvedValue(undefined),
+  end: vi.fn().mockResolvedValue(undefined),
+  put: vi.fn().mockResolvedValue(undefined),
+  mkdir: vi.fn().mockResolvedValue(undefined),
+  stat: vi.fn().mockResolvedValue({ size: 12345, isDirectory: true }),
+  delete: vi.fn().mockResolvedValue(undefined),
+  list: vi.fn().mockResolvedValue([]),
+};
 
+vi.mock('ssh2-sftp-client', () => {
   return {
-    default: vi.fn(() => mockSftp),
+    default: vi.fn(() => mockSftpClient),
   };
 });
 
-// Mock crypto for encryption tests
-vi.mock('crypto', () => ({
-  createCipheriv: vi.fn(() => ({
-    update: vi.fn(() => Buffer.from('encrypted-part1')),
-    final: vi.fn(() => Buffer.from('encrypted-part2')),
-    getAuthTag: vi.fn(() => Buffer.from('auth-tag')),
-  })),
-  createDecipheriv: vi.fn(() => ({
-    update: vi.fn(() => Buffer.from('decrypted-part1')),
-    final: vi.fn(() => Buffer.from('decrypted-part2')),
-    setAuthTag: vi.fn(),
-  })),
-  randomBytes: vi.fn(() => Buffer.from('0123456789abcdef')),
-  scryptSync: vi.fn(() => Buffer.from('derived-key-32-bytes-long-here!')),
+// Mock fs module
+vi.mock('fs', () => ({
+  statSync: vi.fn(() => ({ size: 1000 })),
+  readFileSync: vi.fn(() => Buffer.from('test content')),
 }));
 
 // Create mock SFTP config
-function createMockSftpConfig(overrides: Record<string, unknown> = {}) {
+function createMockSftpConfig(overrides: Partial<SftpConfig> = {}): SftpConfig {
   return {
     host: 'sftp.example.com',
     port: 22,
     username: 'testuser',
     password: 'testpass',
-    remotePath: '/incoming',
+    folderPath: '/incoming',
     ...overrides,
   };
 }
 
 describe('SftpDeliveryService', () => {
   let service: SftpDeliveryService;
-  let mockSftpClient: any;
 
   beforeEach(() => {
     vi.clearAllMocks();
     service = new SftpDeliveryService();
-    mockSftpClient = new SftpClient();
+
+    // Reset mock implementations
+    mockSftpClient.connect.mockResolvedValue(undefined);
+    mockSftpClient.end.mockResolvedValue(undefined);
+    mockSftpClient.put.mockResolvedValue(undefined);
+    mockSftpClient.mkdir.mockResolvedValue(undefined);
+    mockSftpClient.stat.mockResolvedValue({ size: 12345, isDirectory: true });
+    mockSftpClient.delete.mockResolvedValue(undefined);
   });
 
   afterEach(async () => {
-    // Cleanup any connections
-  });
-
-  describe('connect', () => {
-    it('connects with valid credentials', async () => {
-      const config = createMockSftpConfig();
-
-      await service.connect(config);
-
-      expect(mockSftpClient.connect).toHaveBeenCalledWith({
-        host: 'sftp.example.com',
-        port: 22,
-        username: 'testuser',
-        password: 'testpass',
-      });
-    });
-
-    it('connects with SSH key authentication', async () => {
-      const config = createMockSftpConfig({
-        password: undefined,
-        privateKey: '-----BEGIN RSA PRIVATE KEY-----\nMIIE...\n-----END RSA PRIVATE KEY-----',
-      });
-
-      await service.connect(config);
-
-      expect(mockSftpClient.connect).toHaveBeenCalledWith(
-        expect.objectContaining({
-          privateKey: expect.any(String),
-        })
-      );
-    });
-
-    it('uses default port 22 if not specified', async () => {
-      const config = createMockSftpConfig({ port: undefined });
-
-      await service.connect(config);
-
-      expect(mockSftpClient.connect).toHaveBeenCalledWith(
-        expect.objectContaining({
-          port: 22,
-        })
-      );
-    });
-
-    it('handles connection failure', async () => {
-      const config = createMockSftpConfig();
-      mockSftpClient.connect.mockRejectedValue(new Error('Connection refused'));
-
-      await expect(service.connect(config)).rejects.toThrow('Connection refused');
-    });
-
-    it('handles authentication failure', async () => {
-      const config = createMockSftpConfig();
-      mockSftpClient.connect.mockRejectedValue(new Error('Authentication failed'));
-
-      await expect(service.connect(config)).rejects.toThrow('Authentication failed');
-    });
-
-    it('handles timeout', async () => {
-      const config = createMockSftpConfig();
-      mockSftpClient.connect.mockRejectedValue(new Error('Connection timeout'));
-
-      await expect(service.connect(config)).rejects.toThrow('Connection timeout');
-    });
-  });
-
-  describe('upload', () => {
-    it('uploads file to correct path', async () => {
-      const config = createMockSftpConfig();
-      const localPath = '/tmp/data.csv';
-      const remotePath = '/incoming/data.csv';
-
-      await service.connect(config);
-      await service.upload(localPath, remotePath);
-
-      expect(mockSftpClient.put).toHaveBeenCalledWith(localPath, remotePath);
-    });
-
-    it('creates directory if not exists', async () => {
-      const config = createMockSftpConfig();
-      mockSftpClient.exists.mockResolvedValue(false);
-
-      await service.connect(config);
-      await service.upload('/tmp/data.csv', '/incoming/new_folder/data.csv');
-
-      expect(mockSftpClient.mkdir).toHaveBeenCalledWith('/incoming/new_folder', true);
-    });
-
-    it('handles upload failure', async () => {
-      const config = createMockSftpConfig();
-      mockSftpClient.put.mockRejectedValue(new Error('Upload failed: disk full'));
-
-      await service.connect(config);
-      await expect(service.upload('/tmp/data.csv', '/incoming/data.csv')).rejects.toThrow(
-        'Upload failed'
-      );
-    });
-
-    it('handles permission denied', async () => {
-      const config = createMockSftpConfig();
-      mockSftpClient.put.mockRejectedValue(new Error('Permission denied'));
-
-      await service.connect(config);
-      await expect(service.upload('/tmp/data.csv', '/incoming/data.csv')).rejects.toThrow(
-        'Permission denied'
-      );
-    });
-
-    it('throws error if not connected', async () => {
-      await expect(service.upload('/tmp/data.csv', '/incoming/data.csv')).rejects.toThrow();
-    });
-  });
-
-  describe('uploadWithRetry', () => {
-    it('retries on transient errors', async () => {
-      const config = createMockSftpConfig();
-      mockSftpClient.put
-        .mockRejectedValueOnce(new Error('Connection reset'))
-        .mockRejectedValueOnce(new Error('Connection reset'))
-        .mockResolvedValueOnce(undefined);
-
-      await service.connect(config);
-      await service.uploadWithRetry('/tmp/data.csv', '/incoming/data.csv', { maxRetries: 3 });
-
-      expect(mockSftpClient.put).toHaveBeenCalledTimes(3);
-    });
-
-    it('gives up after max retries', async () => {
-      const config = createMockSftpConfig();
-      mockSftpClient.put.mockRejectedValue(new Error('Connection reset'));
-
-      await service.connect(config);
-      await expect(
-        service.uploadWithRetry('/tmp/data.csv', '/incoming/data.csv', { maxRetries: 3 })
-      ).rejects.toThrow();
-
-      expect(mockSftpClient.put).toHaveBeenCalledTimes(3);
-    });
-
-    it('respects retry delay', async () => {
-      const config = createMockSftpConfig();
-      mockSftpClient.put
-        .mockRejectedValueOnce(new Error('Connection reset'))
-        .mockResolvedValueOnce(undefined);
-
-      const startTime = Date.now();
-      await service.connect(config);
-      await service.uploadWithRetry('/tmp/data.csv', '/incoming/data.csv', {
-        maxRetries: 2,
-        retryDelay: 100,
-      });
-
-      const elapsed = Date.now() - startTime;
-      expect(elapsed).toBeGreaterThanOrEqual(100);
-    });
-
-    it('uses exponential backoff', async () => {
-      const config = createMockSftpConfig();
-      mockSftpClient.put
-        .mockRejectedValueOnce(new Error('Connection reset'))
-        .mockRejectedValueOnce(new Error('Connection reset'))
-        .mockResolvedValueOnce(undefined);
-
-      await service.connect(config);
-      await service.uploadWithRetry('/tmp/data.csv', '/incoming/data.csv', {
-        maxRetries: 3,
-        retryDelay: 50,
-        exponentialBackoff: true,
-      });
-
-      expect(mockSftpClient.put).toHaveBeenCalledTimes(3);
-    });
+    vi.restoreAllMocks();
   });
 
   describe('testConnection', () => {
@@ -242,35 +67,60 @@ describe('SftpDeliveryService', () => {
 
       const result = await service.testConnection(config);
 
-      expect(result).toBe(true);
+      expect(result.success).toBe(true);
       expect(mockSftpClient.connect).toHaveBeenCalled();
       expect(mockSftpClient.end).toHaveBeenCalled();
     });
 
-    it('returns false for invalid config', async () => {
+    it('returns failure for invalid config', async () => {
       const config = createMockSftpConfig();
       mockSftpClient.connect.mockRejectedValue(new Error('Connection refused'));
 
       const result = await service.testConnection(config);
 
-      expect(result).toBe(false);
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('Connection refused');
     });
 
-    it('validates remote path exists', async () => {
+    it('validates remote folder exists', async () => {
       const config = createMockSftpConfig();
-
-      await service.testConnection(config);
-
-      expect(mockSftpClient.exists).toHaveBeenCalledWith('/incoming');
-    });
-
-    it('returns false if remote path does not exist', async () => {
-      const config = createMockSftpConfig();
-      mockSftpClient.exists.mockResolvedValue(false);
 
       const result = await service.testConnection(config);
 
-      expect(result).toBe(false);
+      expect(mockSftpClient.stat).toHaveBeenCalledWith('/incoming');
+      expect(result.folderExists).toBe(true);
+    });
+
+    it('returns folderExists false if folder does not exist', async () => {
+      const config = createMockSftpConfig();
+      mockSftpClient.stat.mockRejectedValue(new Error('No such file'));
+
+      const result = await service.testConnection(config);
+
+      expect(result.success).toBe(true);
+      expect(result.folderExists).toBe(false);
+    });
+
+    it('tests write access to folder', async () => {
+      const config = createMockSftpConfig();
+      mockSftpClient.stat.mockResolvedValue({ isDirectory: true });
+      mockSftpClient.put.mockResolvedValue(undefined);
+      mockSftpClient.delete.mockResolvedValue(undefined);
+
+      const result = await service.testConnection(config);
+
+      expect(result.folderWritable).toBe(true);
+    });
+
+    it('returns folderWritable false if write fails', async () => {
+      const config = createMockSftpConfig();
+      mockSftpClient.stat.mockResolvedValue({ isDirectory: true });
+      mockSftpClient.put.mockRejectedValue(new Error('Permission denied'));
+
+      const result = await service.testConnection(config);
+
+      expect(result.success).toBe(true);
+      expect(result.folderWritable).toBe(false);
     });
 
     it('closes connection after test', async () => {
@@ -280,153 +130,201 @@ describe('SftpDeliveryService', () => {
 
       expect(mockSftpClient.end).toHaveBeenCalled();
     });
+
+    it('handles authentication failure', async () => {
+      const config = createMockSftpConfig();
+      mockSftpClient.connect.mockRejectedValue(new Error('Authentication failed'));
+
+      const result = await service.testConnection(config);
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('Authentication failed');
+    });
+
+    it('handles timeout', async () => {
+      const config = createMockSftpConfig();
+      mockSftpClient.connect.mockRejectedValue(new Error('Connection timeout'));
+
+      const result = await service.testConnection(config);
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('Connection timeout');
+    });
   });
 
-  describe('disconnect', () => {
-    it('closes connection', async () => {
+  describe('uploadFile', () => {
+    it('uploads file to correct path', async () => {
+      const config = createMockSftpConfig();
+      const localPath = '/tmp/data.csv';
+
+      const result = await service.uploadFile(config, localPath);
+
+      expect(result.success).toBe(true);
+      expect(mockSftpClient.put).toHaveBeenCalledWith(localPath, '/incoming/data.csv');
+    });
+
+    it('uses custom remote path when provided', async () => {
+      const config = createMockSftpConfig();
+      const localPath = '/tmp/data.csv';
+      const remotePath = 'custom_folder/custom_name.csv';
+
+      const result = await service.uploadFile(config, localPath, remotePath);
+
+      expect(result.success).toBe(true);
+      expect(mockSftpClient.put).toHaveBeenCalledWith(
+        localPath,
+        '/incoming/custom_folder/custom_name.csv'
+      );
+    });
+
+    it('creates directory if not exists', async () => {
+      const config = createMockSftpConfig();
+      const localPath = '/tmp/data.csv';
+
+      await service.uploadFile(config, localPath, 'new_folder/data.csv');
+
+      expect(mockSftpClient.mkdir).toHaveBeenCalledWith(
+        expect.stringContaining('new_folder'),
+        true
+      );
+    });
+
+    it('handles upload failure', async () => {
+      const config = createMockSftpConfig();
+      mockSftpClient.put.mockRejectedValue(new Error('Upload failed: disk full'));
+
+      const result = await service.uploadFile(config, '/tmp/data.csv');
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('Upload failed');
+    });
+
+    it('handles permission denied', async () => {
+      const config = createMockSftpConfig();
+      mockSftpClient.put.mockRejectedValue(new Error('Permission denied'));
+
+      const result = await service.uploadFile(config, '/tmp/data.csv');
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('Permission denied');
+    });
+
+    it('retries on transient errors', async () => {
+      const config = createMockSftpConfig();
+      mockSftpClient.put
+        .mockRejectedValueOnce(new Error('Connection reset'))
+        .mockRejectedValueOnce(new Error('Connection reset'))
+        .mockResolvedValueOnce(undefined);
+
+      const result = await service.uploadFile(config, '/tmp/data.csv');
+
+      expect(result.success).toBe(true);
+      expect(mockSftpClient.put).toHaveBeenCalledTimes(3);
+    });
+
+    it('gives up after max retries', async () => {
+      const config = createMockSftpConfig();
+      mockSftpClient.put.mockRejectedValue(new Error('Connection reset'));
+
+      const result = await service.uploadFile(config, '/tmp/data.csv');
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('after 3 attempts');
+    });
+
+    it('returns file size in result', async () => {
       const config = createMockSftpConfig();
 
-      await service.connect(config);
-      await service.disconnect();
+      const result = await service.uploadFile(config, '/tmp/data.csv');
 
-      expect(mockSftpClient.end).toHaveBeenCalled();
-    });
-
-    it('handles disconnect without connection', async () => {
-      await expect(service.disconnect()).resolves.not.toThrow();
+      expect(result.fileSize).toBe(1000);
     });
   });
 
-  describe('listFiles', () => {
-    it('lists files in remote directory', async () => {
+  describe('uploadBuffer', () => {
+    it('uploads buffer directly to SFTP', async () => {
       const config = createMockSftpConfig();
-      mockSftpClient.list.mockResolvedValue([
-        { name: 'file1.csv', type: '-', size: 1000 },
-        { name: 'file2.csv', type: '-', size: 2000 },
-        { name: 'subdir', type: 'd', size: 0 },
-      ]);
+      const buffer = Buffer.from('test content');
+      const remotePath = 'test.csv';
 
-      await service.connect(config);
-      const files = await service.listFiles('/incoming');
+      const result = await service.uploadBuffer(config, buffer, remotePath);
 
-      expect(files).toHaveLength(3);
-      expect(files[0].name).toBe('file1.csv');
+      expect(result.success).toBe(true);
+      expect(mockSftpClient.put).toHaveBeenCalledWith(buffer, '/incoming/test.csv');
+      expect(result.fileSize).toBe(buffer.length);
     });
 
-    it('filters by pattern', async () => {
+    it('retries on transient errors', async () => {
       const config = createMockSftpConfig();
-      mockSftpClient.list.mockResolvedValue([
-        { name: 'data.csv', type: '-', size: 1000 },
-        { name: 'data.pdf', type: '-', size: 2000 },
-        { name: 'data.jdf', type: '-', size: 500 },
-      ]);
+      const buffer = Buffer.from('test');
+      mockSftpClient.put
+        .mockRejectedValueOnce(new Error('Network error'))
+        .mockResolvedValueOnce(undefined);
 
-      await service.connect(config);
-      const files = await service.listFiles('/incoming', '*.csv');
+      const result = await service.uploadBuffer(config, buffer, 'test.csv');
 
-      expect(files).toHaveLength(1);
-      expect(files[0].name).toBe('data.csv');
+      expect(result.success).toBe(true);
     });
   });
 
-  describe('getFileInfo', () => {
-    it('returns file info', async () => {
-      const config = createMockSftpConfig();
-      mockSftpClient.stat.mockResolvedValue({
-        size: 12345,
-        modifyTime: Date.now(),
-        isDirectory: false,
-      });
-
-      await service.connect(config);
-      const info = await service.getFileInfo('/incoming/data.csv');
-
-      expect(info.size).toBe(12345);
-      expect(info.isDirectory).toBe(false);
-    });
-  });
-
-  describe('encryptCredentials', () => {
-    it('encrypts credentials', () => {
-      const credentials = {
-        password: 'secret-password',
-        privateKey: '-----BEGIN RSA PRIVATE KEY-----\nMIIE...',
-      };
-
-      const encrypted = service.encryptCredentials(credentials);
-
-      expect(encrypted).toBeDefined();
-      expect(typeof encrypted).toBe('string');
-      expect(encrypted).not.toContain('secret-password');
-    });
-
-    it('returns consistent format', () => {
-      const credentials = { password: 'test123' };
-
-      const encrypted = service.encryptCredentials(credentials);
-
-      // Should be base64 or hex encoded
-      expect(encrypted).toMatch(/^[a-zA-Z0-9+/=]+$/);
-    });
-  });
-
-  describe('decryptCredentials', () => {
-    it('decrypts credentials', () => {
-      const credentials = { password: 'secret-password' };
-      const encrypted = service.encryptCredentials(credentials);
-
-      const decrypted = service.decryptCredentials(encrypted);
-
-      expect(decrypted).toBeDefined();
-      expect(decrypted.password).toBeDefined();
-    });
-
-    it('throws on invalid encrypted data', () => {
-      expect(() => service.decryptCredentials('invalid-data')).toThrow();
-    });
-  });
-
-  describe('uploadMultiple', () => {
+  describe('uploadBatch', () => {
     it('uploads multiple files', async () => {
       const config = createMockSftpConfig();
       const files = [
-        { localPath: '/tmp/file1.csv', remotePath: '/incoming/file1.csv' },
-        { localPath: '/tmp/file2.pdf', remotePath: '/incoming/file2.pdf' },
-        { localPath: '/tmp/file3.jdf', remotePath: '/incoming/file3.jdf' },
+        { localPath: '/tmp/file1.csv' },
+        { localPath: '/tmp/file2.pdf' },
+        { localPath: '/tmp/file3.jdf' },
       ];
 
-      await service.connect(config);
-      const results = await service.uploadMultiple(files);
+      const result = await service.uploadBatch(config, files);
 
-      expect(results.success).toHaveLength(3);
-      expect(results.failed).toHaveLength(0);
+      expect(result.success).toBe(true);
+      expect(result.successCount).toBe(3);
+      expect(result.failedCount).toBe(0);
       expect(mockSftpClient.put).toHaveBeenCalledTimes(3);
     });
 
     it('continues on individual failures', async () => {
       const config = createMockSftpConfig();
       const files = [
-        { localPath: '/tmp/file1.csv', remotePath: '/incoming/file1.csv' },
-        { localPath: '/tmp/file2.pdf', remotePath: '/incoming/file2.pdf' },
+        { localPath: '/tmp/file1.csv' },
+        { localPath: '/tmp/file2.pdf' },
       ];
 
       mockSftpClient.put
         .mockResolvedValueOnce(undefined)
+        .mockRejectedValueOnce(new Error('Upload failed'))
+        .mockRejectedValueOnce(new Error('Upload failed'))
         .mockRejectedValueOnce(new Error('Upload failed'));
 
-      await service.connect(config);
-      const results = await service.uploadMultiple(files);
+      const result = await service.uploadBatch(config, files);
 
-      expect(results.success).toHaveLength(1);
-      expect(results.failed).toHaveLength(1);
-      expect(results.failed[0].error).toBe('Upload failed');
+      expect(result.successCount).toBe(1);
+      expect(result.failedCount).toBe(1);
+    });
+
+    it('respects custom remote paths', async () => {
+      const config = createMockSftpConfig();
+      const files = [
+        { localPath: '/tmp/file1.csv', remotePath: 'custom/path.csv' },
+      ];
+
+      await service.uploadBatch(config, files);
+
+      expect(mockSftpClient.put).toHaveBeenCalledWith(
+        '/tmp/file1.csv',
+        '/incoming/custom/path.csv'
+      );
     });
   });
 
   describe('singleton instance', () => {
-    it('exports singleton instance', () => {
-      expect(sftpDeliveryService).toBeDefined();
-      expect(sftpDeliveryService).toBeInstanceOf(SftpDeliveryService);
+    it('returns singleton instance', () => {
+      const instance1 = getSftpDeliveryService();
+      const instance2 = getSftpDeliveryService();
+
+      expect(instance1).toBe(instance2);
+      expect(instance1).toBeInstanceOf(SftpDeliveryService);
     });
   });
 });

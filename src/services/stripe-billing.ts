@@ -1,10 +1,19 @@
 /**
  * Stripe Billing Service
  * Handles all Stripe-related billing operations for Direct Mode
+ *
+ * When DEMO_MODE=true, returns mock billing data without calling Stripe.
  */
 
 import Stripe from 'stripe';
 import { prisma } from '../db/client.js';
+
+/**
+ * Check demo mode at runtime (not cached at module load)
+ */
+function isDemoMode(): boolean {
+  return process.env.DEMO_MODE === 'true';
+}
 
 /**
  * Get Stripe client instance
@@ -110,6 +119,12 @@ export async function createCheckoutSession(params: {
   sessionId: string;
   url: string;
 }> {
+  if (isDemoMode()) {
+    return {
+      sessionId: `cs_demo_${Date.now()}`,
+      url: `https://checkout.stripe.com/demo/${params.planType}`,
+    };
+  }
   const stripe = getStripeClient();
   const plan = PLANS[params.planType];
 
@@ -308,6 +323,9 @@ export async function createPortalSession(params: {
 }): Promise<{
   url: string;
 }> {
+  if (isDemoMode()) {
+    return { url: `https://billing.stripe.com/demo/portal?return=${encodeURIComponent(params.returnUrl)}` };
+  }
   const stripe = getStripeClient();
 
   const session = await stripe.billingPortal.sessions.create({
@@ -353,6 +371,24 @@ export async function getBillingStatus(customerId: string): Promise<{
     currency: string;
   } | null;
 }> {
+  if (isDemoMode()) {
+    const now = new Date();
+    const periodEnd = new Date(now);
+    periodEnd.setMonth(periodEnd.getMonth() + 1);
+    return {
+      customer: { id: customerId, email: 'demo@leadsplease.com', name: 'Demo Company' },
+      subscription: {
+        id: 'sub_demo_123',
+        status: 'active',
+        plan: 'professional',
+        currentPeriodStart: now,
+        currentPeriodEnd: periodEnd,
+      },
+      paymentMethod: { type: 'card', last4: '4242', brand: 'visa', expMonth: 12, expYear: 2027 },
+      usageThisPeriod: { dataRecords: 1450, pdfGeneration: 85, printJobs: 42 },
+      upcomingInvoice: { amountDue: 156.75, currency: 'usd' },
+    };
+  }
   const stripe = getStripeClient();
 
   // Get customer
@@ -538,6 +574,9 @@ export async function resumeSubscription(subscriptionId: string): Promise<void> 
  * Get or create Stripe customer for a tenant
  */
 export async function getOrCreateCustomer(tenantId: string): Promise<string> {
+  if (isDemoMode()) {
+    return `cus_demo_${tenantId}`;
+  }
   const tenant = await prisma.tenant.findUnique({
     where: { id: tenantId },
   });

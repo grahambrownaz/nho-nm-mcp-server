@@ -1,30 +1,21 @@
 /**
- * Tests for Scheduler (Cron Job Manager)
+ * Tests for DeliveryScheduler (Scheduled Delivery Processing)
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { Scheduler, scheduler, CronJob } from '../../../src/cron/scheduler.js';
-import { subscriptionProcessor } from '../../../src/cron/subscription-processor.js';
-import { logger } from '../../../src/utils/logger.js';
+import {
+  DeliveryScheduler,
+  getScheduler,
+  startScheduler,
+  stopScheduler,
+  type SchedulerConfig,
+  type ProcessingRunResult,
+} from '../../../src/cron/scheduler.js';
+import * as subscriptionProcessor from '../../../src/cron/subscription-processor.js';
 
 // Mock dependencies
 vi.mock('../../../src/cron/subscription-processor.js', () => ({
-  subscriptionProcessor: {
-    processAll: vi.fn(),
-  },
-}));
-
-vi.mock('../../../src/utils/logger.js', () => ({
-  logger: {
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    child: vi.fn(() => ({
-      info: vi.fn(),
-      warn: vi.fn(),
-      error: vi.fn(),
-    })),
-  },
+  processAllDueSubscriptions: vi.fn(),
 }));
 
 // Mock node-cron
@@ -34,472 +25,311 @@ vi.mock('node-cron', () => ({
       start: vi.fn(),
       stop: vi.fn(),
       destroy: vi.fn(),
-      getStatus: vi.fn(() => 'scheduled'),
     })),
-    validate: vi.fn((expression) => {
-      // Basic cron validation
-      const parts = expression.split(' ');
-      return parts.length === 5 || parts.length === 6;
-    }),
+    validate: vi.fn(() => true),
   },
 }));
 
-describe('Scheduler', () => {
-  let schedulerInstance: Scheduler;
+describe('DeliveryScheduler', () => {
+  let scheduler: DeliveryScheduler;
 
   beforeEach(() => {
     vi.clearAllMocks();
-    vi.useFakeTimers();
-    schedulerInstance = new Scheduler();
+    scheduler = new DeliveryScheduler({
+      enabled: true,
+      timezone: 'America/New_York',
+      deliveryHour: 6,
+      batchSize: 10,
+      retryFailedAfterMinutes: 30,
+    });
 
-    // Default mock responses
-    vi.mocked(subscriptionProcessor.processAll).mockResolvedValue({
+    // Default mock response
+    vi.mocked(subscriptionProcessor.processAllDueSubscriptions).mockResolvedValue({
       processed: 5,
-      succeeded: 5,
+      successful: 5,
       failed: 0,
+      results: [],
     });
   });
 
   afterEach(() => {
-    vi.useRealTimers();
-    schedulerInstance.stopAll();
+    scheduler.stop();
   });
 
-  describe('registerJob', () => {
-    it('registers a new cron job', () => {
-      const job: CronJob = {
-        name: 'test-job',
-        schedule: '0 * * * *', // Every hour
-        handler: vi.fn(),
-      };
+  describe('constructor', () => {
+    it('creates scheduler with default config', () => {
+      const defaultScheduler = new DeliveryScheduler();
+      const status = defaultScheduler.getStatus();
 
-      schedulerInstance.registerJob(job);
+      expect(status.config.enabled).toBe(true);
+      expect(status.config.timezone).toBe('America/New_York');
+      expect(status.config.deliveryHour).toBe(6);
 
-      const jobs = schedulerInstance.listJobs();
-      expect(jobs).toContain('test-job');
+      defaultScheduler.stop();
     });
 
-    it('validates cron expression', () => {
-      const invalidJob: CronJob = {
-        name: 'invalid-job',
-        schedule: 'not-a-cron-expression',
-        handler: vi.fn(),
-      };
-
-      expect(() => schedulerInstance.registerJob(invalidJob)).toThrow();
-    });
-
-    it('prevents duplicate job names', () => {
-      const job: CronJob = {
-        name: 'duplicate-job',
-        schedule: '0 * * * *',
-        handler: vi.fn(),
-      };
-
-      schedulerInstance.registerJob(job);
-
-      expect(() => schedulerInstance.registerJob(job)).toThrow();
-    });
-
-    it('accepts valid cron expressions', () => {
-      const expressions = [
-        '* * * * *', // Every minute
-        '0 * * * *', // Every hour
-        '0 0 * * *', // Every day at midnight
-        '0 0 * * 1', // Every Monday at midnight
-        '0 0 1 * *', // First of every month
-        '*/5 * * * *', // Every 5 minutes
-        '0 9-17 * * 1-5', // 9am-5pm weekdays
-      ];
-
-      expressions.forEach((schedule, index) => {
-        const job: CronJob = {
-          name: `job-${index}`,
-          schedule,
-          handler: vi.fn(),
-        };
-
-        expect(() => schedulerInstance.registerJob(job)).not.toThrow();
+    it('accepts custom config', () => {
+      const customScheduler = new DeliveryScheduler({
+        enabled: false,
+        timezone: 'America/Phoenix',
+        deliveryHour: 8,
       });
+      const status = customScheduler.getStatus();
+
+      expect(status.config.enabled).toBe(false);
+      expect(status.config.timezone).toBe('America/Phoenix');
+      expect(status.config.deliveryHour).toBe(8);
+
+      customScheduler.stop();
     });
   });
 
-  describe('unregisterJob', () => {
-    it('unregisters an existing job', () => {
-      const job: CronJob = {
-        name: 'removable-job',
-        schedule: '0 * * * *',
-        handler: vi.fn(),
-      };
+  describe('start', () => {
+    it('starts scheduler when enabled', () => {
+      const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
 
-      schedulerInstance.registerJob(job);
-      schedulerInstance.unregisterJob('removable-job');
+      scheduler.start();
 
-      const jobs = schedulerInstance.listJobs();
-      expect(jobs).not.toContain('removable-job');
-    });
-
-    it('throws for non-existent job', () => {
-      expect(() => schedulerInstance.unregisterJob('non-existent')).toThrow();
-    });
-  });
-
-  describe('startJob', () => {
-    it('starts a registered job', () => {
-      const handler = vi.fn();
-      const job: CronJob = {
-        name: 'startable-job',
-        schedule: '0 * * * *',
-        handler,
-      };
-
-      schedulerInstance.registerJob(job);
-      schedulerInstance.startJob('startable-job');
-
-      expect(schedulerInstance.isJobRunning('startable-job')).toBe(true);
-    });
-
-    it('throws for non-existent job', () => {
-      expect(() => schedulerInstance.startJob('non-existent')).toThrow();
-    });
-  });
-
-  describe('stopJob', () => {
-    it('stops a running job', () => {
-      const job: CronJob = {
-        name: 'stoppable-job',
-        schedule: '0 * * * *',
-        handler: vi.fn(),
-      };
-
-      schedulerInstance.registerJob(job);
-      schedulerInstance.startJob('stoppable-job');
-      schedulerInstance.stopJob('stoppable-job');
-
-      expect(schedulerInstance.isJobRunning('stoppable-job')).toBe(false);
-    });
-  });
-
-  describe('startAll', () => {
-    it('starts all registered jobs', () => {
-      schedulerInstance.registerJob({
-        name: 'job-1',
-        schedule: '0 * * * *',
-        handler: vi.fn(),
-      });
-      schedulerInstance.registerJob({
-        name: 'job-2',
-        schedule: '0 0 * * *',
-        handler: vi.fn(),
-      });
-
-      schedulerInstance.startAll();
-
-      expect(schedulerInstance.isJobRunning('job-1')).toBe(true);
-      expect(schedulerInstance.isJobRunning('job-2')).toBe(true);
-    });
-  });
-
-  describe('stopAll', () => {
-    it('stops all running jobs', () => {
-      schedulerInstance.registerJob({
-        name: 'job-1',
-        schedule: '0 * * * *',
-        handler: vi.fn(),
-      });
-      schedulerInstance.registerJob({
-        name: 'job-2',
-        schedule: '0 0 * * *',
-        handler: vi.fn(),
-      });
-
-      schedulerInstance.startAll();
-      schedulerInstance.stopAll();
-
-      expect(schedulerInstance.isJobRunning('job-1')).toBe(false);
-      expect(schedulerInstance.isJobRunning('job-2')).toBe(false);
-    });
-  });
-
-  describe('job execution', () => {
-    it('executes handler on schedule trigger', async () => {
-      const handler = vi.fn().mockResolvedValue(undefined);
-      const job: CronJob = {
-        name: 'executable-job',
-        schedule: '* * * * *',
-        handler,
-      };
-
-      schedulerInstance.registerJob(job);
-      schedulerInstance.startJob('executable-job');
-
-      // Manually trigger the job
-      await schedulerInstance.triggerJob('executable-job');
-
-      expect(handler).toHaveBeenCalled();
-    });
-
-    it('logs job start and completion', async () => {
-      const handler = vi.fn().mockResolvedValue(undefined);
-      const job: CronJob = {
-        name: 'logged-job',
-        schedule: '* * * * *',
-        handler,
-      };
-
-      schedulerInstance.registerJob(job);
-      await schedulerInstance.triggerJob('logged-job');
-
-      expect(logger.info).toHaveBeenCalledWith(
-        expect.objectContaining({ job: 'logged-job' }),
-        expect.stringContaining('started')
+      expect(consoleSpy).toHaveBeenCalledWith(
+        expect.stringContaining('[Scheduler] Started')
       );
+
+      consoleSpy.mockRestore();
     });
 
-    it('logs job errors', async () => {
-      const handler = vi.fn().mockRejectedValue(new Error('Job failed'));
-      const job: CronJob = {
-        name: 'failing-job',
-        schedule: '* * * * *',
-        handler,
-      };
+    it('does not start when disabled', () => {
+      const disabledScheduler = new DeliveryScheduler({ enabled: false });
+      const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
 
-      schedulerInstance.registerJob(job);
-      await schedulerInstance.triggerJob('failing-job');
+      disabledScheduler.start();
 
-      expect(logger.error).toHaveBeenCalledWith(
-        expect.objectContaining({
-          job: 'failing-job',
-          error: expect.stringContaining('Job failed'),
-        }),
-        expect.any(String)
+      expect(consoleSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Scheduler is disabled')
       );
+
+      consoleSpy.mockRestore();
+      disabledScheduler.stop();
     });
   });
 
-  describe('error handling', () => {
-    it('continues running after job failure', async () => {
-      const failingHandler = vi.fn().mockRejectedValue(new Error('Failed'));
-      const job: CronJob = {
-        name: 'resilient-job',
-        schedule: '* * * * *',
-        handler: failingHandler,
-      };
+  describe('stop', () => {
+    it('stops running scheduler', () => {
+      const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
 
-      schedulerInstance.registerJob(job);
-      schedulerInstance.startJob('resilient-job');
+      scheduler.start();
+      scheduler.stop();
 
-      // Trigger multiple times
-      await schedulerInstance.triggerJob('resilient-job');
-      await schedulerInstance.triggerJob('resilient-job');
+      expect(consoleSpy).toHaveBeenCalledWith('[Scheduler] Stopped');
 
-      expect(failingHandler).toHaveBeenCalledTimes(2);
-      expect(schedulerInstance.isJobRunning('resilient-job')).toBe(true);
+      consoleSpy.mockRestore();
+    });
+  });
+
+  describe('triggerProcessing', () => {
+    it('processes due subscriptions', async () => {
+      const result = await scheduler.triggerProcessing();
+
+      expect(subscriptionProcessor.processAllDueSubscriptions).toHaveBeenCalled();
+      expect(result?.processed).toBe(5);
+      expect(result?.successful).toBe(5);
+      expect(result?.failed).toBe(0);
     });
 
-    it('prevents concurrent execution by default', async () => {
-      let isRunning = false;
-      const handler = vi.fn().mockImplementation(async () => {
-        if (isRunning) {
-          throw new Error('Concurrent execution detected');
+    it('returns run result with timing information', async () => {
+      const result = await scheduler.triggerProcessing();
+
+      expect(result?.runId).toBeDefined();
+      expect(result?.startedAt).toBeInstanceOf(Date);
+      expect(result?.completedAt).toBeInstanceOf(Date);
+      expect(result?.durationMs).toBeGreaterThanOrEqual(0);
+    });
+
+    it('records run in history', async () => {
+      await scheduler.triggerProcessing();
+      await scheduler.triggerProcessing();
+
+      const history = scheduler.getHistory();
+
+      expect(history).toHaveLength(2);
+      expect(history[0].runId).toContain('manual_');
+    });
+
+    it('prevents concurrent processing', async () => {
+      // Start a long-running process
+      vi.mocked(subscriptionProcessor.processAllDueSubscriptions).mockImplementation(
+        async () => {
+          await new Promise((resolve) => setTimeout(resolve, 100));
+          return { processed: 1, successful: 1, failed: 0, results: [] };
         }
-        isRunning = true;
-        await new Promise((resolve) => setTimeout(resolve, 100));
-        isRunning = false;
-      });
+      );
 
-      const job: CronJob = {
-        name: 'non-concurrent-job',
-        schedule: '* * * * *',
-        handler,
-        allowConcurrent: false,
-      };
-
-      schedulerInstance.registerJob(job);
+      const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
 
       // Trigger twice quickly
-      const trigger1 = schedulerInstance.triggerJob('non-concurrent-job');
-      const trigger2 = schedulerInstance.triggerJob('non-concurrent-job');
+      const firstPromise = scheduler.triggerProcessing();
+      const secondResult = await scheduler.triggerProcessing();
 
-      vi.advanceTimersByTime(200);
-      await Promise.all([trigger1, trigger2]);
+      // Second one should be skipped
+      expect(secondResult).toBeNull();
+      expect(consoleSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Already processing')
+      );
 
-      // Second trigger should be skipped
-      expect(handler).toHaveBeenCalledTimes(1);
+      await firstPromise;
+      consoleSpy.mockRestore();
     });
 
-    it('allows concurrent execution when enabled', async () => {
-      const handler = vi.fn().mockResolvedValue(undefined);
+    it('handles processing errors gracefully', async () => {
+      vi.mocked(subscriptionProcessor.processAllDueSubscriptions).mockRejectedValue(
+        new Error('Processing failed')
+      );
 
-      const job: CronJob = {
-        name: 'concurrent-job',
-        schedule: '* * * * *',
-        handler,
-        allowConcurrent: true,
-      };
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
-      schedulerInstance.registerJob(job);
+      const result = await scheduler.triggerProcessing();
 
-      // Trigger multiple times
-      await Promise.all([
-        schedulerInstance.triggerJob('concurrent-job'),
-        schedulerInstance.triggerJob('concurrent-job'),
-      ]);
+      expect(result).toBeNull();
+      expect(consoleSpy).toHaveBeenCalledWith(
+        expect.stringContaining('[Scheduler] Error'),
+        expect.any(Error)
+      );
 
-      expect(handler).toHaveBeenCalledTimes(2);
+      consoleSpy.mockRestore();
     });
   });
 
-  describe('subscription processor integration', () => {
-    it('registers subscription processor job', () => {
-      schedulerInstance.registerDefaultJobs();
+  describe('getStatus', () => {
+    it('returns scheduler status', () => {
+      const status = scheduler.getStatus();
 
-      const jobs = schedulerInstance.listJobs();
-      expect(jobs).toContain('subscription-processor');
+      expect(status.enabled).toBe(true);
+      expect(status.isProcessing).toBe(false);
+      expect(status.config).toBeDefined();
     });
 
-    it('runs subscription processor on trigger', async () => {
-      schedulerInstance.registerDefaultJobs();
-      await schedulerInstance.triggerJob('subscription-processor');
+    it('shows daily task as running after start', () => {
+      scheduler.start();
+      const status = scheduler.getStatus();
 
-      expect(subscriptionProcessor.processAll).toHaveBeenCalled();
+      expect(status.uptime.dailyTaskRunning).toBe(true);
+      expect(status.uptime.retryTaskRunning).toBe(true);
     });
 
-    it('logs subscription processor results', async () => {
-      vi.mocked(subscriptionProcessor.processAll).mockResolvedValue({
-        processed: 10,
-        succeeded: 8,
-        failed: 2,
-      });
+    it('calculates next daily run time', () => {
+      scheduler.start();
+      const status = scheduler.getStatus();
 
-      schedulerInstance.registerDefaultJobs();
-      await schedulerInstance.triggerJob('subscription-processor');
+      expect(status.nextDailyRun).toBeInstanceOf(Date);
+      expect(status.nextDailyRun!.getTime()).toBeGreaterThan(Date.now());
+    });
 
-      expect(logger.info).toHaveBeenCalledWith(
-        expect.objectContaining({
-          processed: 10,
-          succeeded: 8,
-          failed: 2,
-        }),
-        expect.any(String)
+    it('includes last run result', async () => {
+      await scheduler.triggerProcessing();
+      const status = scheduler.getStatus();
+
+      expect(status.lastRun).toBeDefined();
+      expect(status.lastRun?.processed).toBe(5);
+    });
+  });
+
+  describe('getHistory', () => {
+    it('returns empty array initially', () => {
+      const history = scheduler.getHistory();
+
+      expect(history).toEqual([]);
+    });
+
+    it('returns recent runs', async () => {
+      await scheduler.triggerProcessing();
+      await scheduler.triggerProcessing();
+      await scheduler.triggerProcessing();
+
+      const history = scheduler.getHistory(2);
+
+      expect(history).toHaveLength(2);
+    });
+
+    it('returns runs in reverse chronological order', async () => {
+      await scheduler.triggerProcessing();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      await scheduler.triggerProcessing();
+
+      const history = scheduler.getHistory();
+
+      expect(history[0].startedAt.getTime()).toBeGreaterThan(
+        history[1].startedAt.getTime()
       );
     });
   });
 
-  describe('job configuration', () => {
-    it('respects timezone option', () => {
-      const job: CronJob = {
-        name: 'timezone-job',
-        schedule: '0 9 * * *',
-        handler: vi.fn(),
-        timezone: 'America/Phoenix',
-      };
-
-      schedulerInstance.registerJob(job);
-      const config = schedulerInstance.getJobConfig('timezone-job');
-
-      expect(config?.timezone).toBe('America/Phoenix');
-    });
-
-    it('respects enabled option', () => {
-      const job: CronJob = {
-        name: 'disabled-job',
-        schedule: '0 * * * *',
-        handler: vi.fn(),
-        enabled: false,
-      };
-
-      schedulerInstance.registerJob(job);
-      schedulerInstance.startAll();
-
-      expect(schedulerInstance.isJobRunning('disabled-job')).toBe(false);
-    });
-  });
-
-  describe('getJobStats', () => {
-    it('returns execution statistics', async () => {
-      const job: CronJob = {
-        name: 'stats-job',
-        schedule: '* * * * *',
-        handler: vi.fn().mockResolvedValue(undefined),
-      };
-
-      schedulerInstance.registerJob(job);
-      await schedulerInstance.triggerJob('stats-job');
-      await schedulerInstance.triggerJob('stats-job');
-
-      const stats = schedulerInstance.getJobStats('stats-job');
-
-      expect(stats.executionCount).toBe(2);
-      expect(stats.lastExecutionTime).toBeDefined();
-      expect(stats.successCount).toBe(2);
-      expect(stats.failureCount).toBe(0);
-    });
-
-    it('tracks failed executions', async () => {
-      const job: CronJob = {
-        name: 'failing-stats-job',
-        schedule: '* * * * *',
-        handler: vi.fn().mockRejectedValue(new Error('Failed')),
-      };
-
-      schedulerInstance.registerJob(job);
-      await schedulerInstance.triggerJob('failing-stats-job');
-
-      const stats = schedulerInstance.getJobStats('failing-stats-job');
-
-      expect(stats.failureCount).toBe(1);
-      expect(stats.lastError).toBe('Failed');
-    });
-  });
-
-  describe('listJobs', () => {
-    it('returns all registered job names', () => {
-      schedulerInstance.registerJob({
-        name: 'job-a',
-        schedule: '0 * * * *',
-        handler: vi.fn(),
-      });
-      schedulerInstance.registerJob({
-        name: 'job-b',
-        schedule: '0 0 * * *',
-        handler: vi.fn(),
+  describe('updateConfig', () => {
+    it('updates scheduler configuration', () => {
+      scheduler.updateConfig({
+        deliveryHour: 10,
+        batchSize: 20,
       });
 
-      const jobs = schedulerInstance.listJobs();
+      const status = scheduler.getStatus();
 
-      expect(jobs).toContain('job-a');
-      expect(jobs).toContain('job-b');
-      expect(jobs).toHaveLength(2);
+      expect(status.config.deliveryHour).toBe(10);
+      expect(status.config.batchSize).toBe(20);
+    });
+
+    it('stops scheduler when disabled', () => {
+      scheduler.start();
+      expect(scheduler.getStatus().uptime.dailyTaskRunning).toBe(true);
+
+      scheduler.updateConfig({ enabled: false });
+      expect(scheduler.getStatus().uptime.dailyTaskRunning).toBe(false);
+    });
+
+    it('starts scheduler when enabled', () => {
+      const disabledScheduler = new DeliveryScheduler({ enabled: false });
+      expect(disabledScheduler.getStatus().uptime.dailyTaskRunning).toBe(false);
+
+      disabledScheduler.updateConfig({ enabled: true });
+      expect(disabledScheduler.getStatus().uptime.dailyTaskRunning).toBe(true);
+
+      disabledScheduler.stop();
+    });
+  });
+});
+
+describe('Singleton functions', () => {
+  afterEach(() => {
+    stopScheduler();
+  });
+
+  describe('getScheduler', () => {
+    it('returns scheduler instance', () => {
+      const scheduler = getScheduler();
+
+      expect(scheduler).toBeInstanceOf(DeliveryScheduler);
+    });
+
+    it('returns same instance on subsequent calls', () => {
+      const scheduler1 = getScheduler();
+      const scheduler2 = getScheduler();
+
+      expect(scheduler1).toBe(scheduler2);
     });
   });
 
-  describe('getNextRunTime', () => {
-    it('returns next scheduled run time', () => {
-      const job: CronJob = {
-        name: 'next-run-job',
-        schedule: '0 0 * * *', // Midnight daily
-        handler: vi.fn(),
-      };
+  describe('startScheduler', () => {
+    it('starts and returns scheduler', () => {
+      const scheduler = startScheduler();
 
-      schedulerInstance.registerJob(job);
-      const nextRun = schedulerInstance.getNextRunTime('next-run-job');
-
-      expect(nextRun).toBeInstanceOf(Date);
-      expect(nextRun!.getTime()).toBeGreaterThan(Date.now());
-    });
-
-    it('returns null for non-existent job', () => {
-      const nextRun = schedulerInstance.getNextRunTime('non-existent');
-
-      expect(nextRun).toBeNull();
+      expect(scheduler).toBeInstanceOf(DeliveryScheduler);
+      expect(scheduler.getStatus().uptime.dailyTaskRunning).toBe(true);
     });
   });
 
-  describe('singleton instance', () => {
-    it('exports singleton instance', () => {
-      expect(scheduler).toBeDefined();
-      expect(scheduler).toBeInstanceOf(Scheduler);
+  describe('stopScheduler', () => {
+    it('stops the scheduler', () => {
+      const scheduler = startScheduler();
+      stopScheduler();
+
+      expect(scheduler.getStatus().uptime.dailyTaskRunning).toBe(false);
     });
   });
 });

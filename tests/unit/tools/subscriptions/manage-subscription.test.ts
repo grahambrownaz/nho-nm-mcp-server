@@ -11,7 +11,7 @@ import { ValidationError, AuthorizationError, NotFoundError } from '../../../../
 // Mock Prisma client
 vi.mock('../../../../src/db/client.js', () => ({
   prisma: {
-    subscription: {
+    dataSubscription: {
       findUnique: vi.fn(),
       update: vi.fn(),
     },
@@ -61,18 +61,17 @@ function createTestContext(overrides: Partial<TenantContext> = {}): TenantContex
       tenantId: 'test-tenant-id',
       plan: 'PROFESSIONAL',
       status: 'ACTIVE',
+      stripeSubscriptionId: null,
       monthlyRecordLimit: 10000,
       monthlyEmailAppends: 5000,
       monthlyPhoneAppends: 5000,
       allowedDatabases: ['NHO', 'NEW_MOVER', 'CONSUMER', 'BUSINESS'],
-      allowedGeographies: null,
       allowedStates: [],
       allowedZipCodes: [],
       pricePerRecord: mockDecimal(0.05),
       priceEmailAppend: mockDecimal(0.02),
       pricePhoneAppend: mockDecimal(0.03),
       pricePdfGeneration: mockDecimal(0.10),
-      pricePrintPerPiece: mockDecimal(0.65),
       billingCycleStart: new Date(),
       billingCycleEnd: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
       createdAt: new Date(),
@@ -83,12 +82,18 @@ function createTestContext(overrides: Partial<TenantContext> = {}): TenantContex
   };
 }
 
+// Valid UUID for testing
+const TEST_SUBSCRIPTION_ID = '00000000-0000-0000-0000-000000000001';
+
 // Create a mock data subscription
 function createMockDataSubscription(overrides: Record<string, unknown> = {}) {
   return {
-    id: 'data-subscription-id',
+    id: TEST_SUBSCRIPTION_ID,
     name: 'Test Data Subscription',
     tenantId: 'test-tenant-id',
+    clientName: null,
+    clientEmail: null,
+    clientPhone: null,
     database: 'NHO',
     geography: { type: 'zip', values: ['85001'] },
     filters: {},
@@ -98,9 +103,12 @@ function createMockDataSubscription(overrides: Record<string, unknown> = {}) {
     fulfillmentMethod: 'DOWNLOAD',
     fulfillmentConfig: {},
     syncChannels: [],
-    clientInfo: null,
-    nextDelivery: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
-    lastDelivery: null,
+    nextDeliveryAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+    lastDeliveryAt: null,
+    pausedAt: null,
+    cancelledAt: null,
+    totalDeliveries: 0,
+    totalRecords: 0,
     createdAt: new Date(),
     updatedAt: new Date(),
     ...overrides,
@@ -112,29 +120,29 @@ describe('manage_subscription tool', () => {
     vi.clearAllMocks();
 
     // Setup default mock response
-    vi.mocked(prisma.subscription.findUnique).mockResolvedValue(createMockDataSubscription());
-    vi.mocked(prisma.subscription.update).mockResolvedValue(createMockDataSubscription());
+    vi.mocked(prisma.dataSubscription.findUnique).mockResolvedValue(createMockDataSubscription() as any);
+    vi.mocked(prisma.dataSubscription.update).mockResolvedValue(createMockDataSubscription() as any);
   });
 
   describe('pause action', () => {
     it('pauses an active subscription', async () => {
       const context = createTestContext();
       const input = {
-        subscription_id: 'data-subscription-id',
+        subscription_id: TEST_SUBSCRIPTION_ID,
         action: 'pause',
       };
 
-      vi.mocked(prisma.subscription.update).mockResolvedValue(
-        createMockDataSubscription({ status: 'PAUSED' })
+      vi.mocked(prisma.dataSubscription.update).mockResolvedValue(
+        createMockDataSubscription({ status: 'PAUSED', pausedAt: new Date() }) as any
       );
 
       const result = await executeManageSubscription(input, context);
 
       expect(result.success).toBe(true);
-      expect(result.data?.status).toBe('PAUSED');
-      expect(prisma.subscription.update).toHaveBeenCalledWith(
+      expect(result.data?.subscription.status).toBe('PAUSED');
+      expect(prisma.dataSubscription.update).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: { id: 'data-subscription-id' },
+          where: { id: TEST_SUBSCRIPTION_ID },
           data: expect.objectContaining({ status: 'PAUSED' }),
         })
       );
@@ -143,12 +151,12 @@ describe('manage_subscription tool', () => {
     it('throws error when pausing already paused subscription', async () => {
       const context = createTestContext();
       const input = {
-        subscription_id: 'data-subscription-id',
+        subscription_id: TEST_SUBSCRIPTION_ID,
         action: 'pause',
       };
 
-      vi.mocked(prisma.subscription.findUnique).mockResolvedValue(
-        createMockDataSubscription({ status: 'PAUSED' })
+      vi.mocked(prisma.dataSubscription.findUnique).mockResolvedValue(
+        createMockDataSubscription({ status: 'PAUSED' }) as any
       );
 
       await expect(executeManageSubscription(input, context)).rejects.toThrow();
@@ -159,24 +167,24 @@ describe('manage_subscription tool', () => {
     it('resumes a paused subscription', async () => {
       const context = createTestContext();
       const input = {
-        subscription_id: 'data-subscription-id',
+        subscription_id: TEST_SUBSCRIPTION_ID,
         action: 'resume',
       };
 
-      vi.mocked(prisma.subscription.findUnique).mockResolvedValue(
-        createMockDataSubscription({ status: 'PAUSED' })
+      vi.mocked(prisma.dataSubscription.findUnique).mockResolvedValue(
+        createMockDataSubscription({ status: 'PAUSED' }) as any
       );
-      vi.mocked(prisma.subscription.update).mockResolvedValue(
-        createMockDataSubscription({ status: 'ACTIVE' })
+      vi.mocked(prisma.dataSubscription.update).mockResolvedValue(
+        createMockDataSubscription({ status: 'ACTIVE' }) as any
       );
 
       const result = await executeManageSubscription(input, context);
 
       expect(result.success).toBe(true);
-      expect(result.data?.status).toBe('ACTIVE');
-      expect(prisma.subscription.update).toHaveBeenCalledWith(
+      expect(result.data?.subscription.status).toBe('ACTIVE');
+      expect(prisma.dataSubscription.update).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: { id: 'data-subscription-id' },
+          where: { id: TEST_SUBSCRIPTION_ID },
           data: expect.objectContaining({ status: 'ACTIVE' }),
         })
       );
@@ -185,12 +193,12 @@ describe('manage_subscription tool', () => {
     it('throws error when resuming active subscription', async () => {
       const context = createTestContext();
       const input = {
-        subscription_id: 'data-subscription-id',
+        subscription_id: TEST_SUBSCRIPTION_ID,
         action: 'resume',
       };
 
-      vi.mocked(prisma.subscription.findUnique).mockResolvedValue(
-        createMockDataSubscription({ status: 'ACTIVE' })
+      vi.mocked(prisma.dataSubscription.findUnique).mockResolvedValue(
+        createMockDataSubscription({ status: 'ACTIVE' }) as any
       );
 
       await expect(executeManageSubscription(input, context)).rejects.toThrow();
@@ -199,12 +207,12 @@ describe('manage_subscription tool', () => {
     it('throws error when resuming cancelled subscription', async () => {
       const context = createTestContext();
       const input = {
-        subscription_id: 'data-subscription-id',
+        subscription_id: TEST_SUBSCRIPTION_ID,
         action: 'resume',
       };
 
-      vi.mocked(prisma.subscription.findUnique).mockResolvedValue(
-        createMockDataSubscription({ status: 'CANCELLED' })
+      vi.mocked(prisma.dataSubscription.findUnique).mockResolvedValue(
+        createMockDataSubscription({ status: 'CANCELLED' }) as any
       );
 
       await expect(executeManageSubscription(input, context)).rejects.toThrow();
@@ -215,21 +223,21 @@ describe('manage_subscription tool', () => {
     it('cancels an active subscription', async () => {
       const context = createTestContext();
       const input = {
-        subscription_id: 'data-subscription-id',
+        subscription_id: TEST_SUBSCRIPTION_ID,
         action: 'cancel',
       };
 
-      vi.mocked(prisma.subscription.update).mockResolvedValue(
-        createMockDataSubscription({ status: 'CANCELLED' })
+      vi.mocked(prisma.dataSubscription.update).mockResolvedValue(
+        createMockDataSubscription({ status: 'CANCELLED', cancelledAt: new Date() }) as any
       );
 
       const result = await executeManageSubscription(input, context);
 
       expect(result.success).toBe(true);
-      expect(result.data?.status).toBe('CANCELLED');
-      expect(prisma.subscription.update).toHaveBeenCalledWith(
+      expect(result.data?.subscription.status).toBe('CANCELLED');
+      expect(prisma.dataSubscription.update).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: { id: 'data-subscription-id' },
+          where: { id: TEST_SUBSCRIPTION_ID },
           data: expect.objectContaining({ status: 'CANCELLED' }),
         })
       );
@@ -238,32 +246,32 @@ describe('manage_subscription tool', () => {
     it('cancels a paused subscription', async () => {
       const context = createTestContext();
       const input = {
-        subscription_id: 'data-subscription-id',
+        subscription_id: TEST_SUBSCRIPTION_ID,
         action: 'cancel',
       };
 
-      vi.mocked(prisma.subscription.findUnique).mockResolvedValue(
-        createMockDataSubscription({ status: 'PAUSED' })
+      vi.mocked(prisma.dataSubscription.findUnique).mockResolvedValue(
+        createMockDataSubscription({ status: 'PAUSED' }) as any
       );
-      vi.mocked(prisma.subscription.update).mockResolvedValue(
-        createMockDataSubscription({ status: 'CANCELLED' })
+      vi.mocked(prisma.dataSubscription.update).mockResolvedValue(
+        createMockDataSubscription({ status: 'CANCELLED', cancelledAt: new Date() }) as any
       );
 
       const result = await executeManageSubscription(input, context);
 
       expect(result.success).toBe(true);
-      expect(result.data?.status).toBe('CANCELLED');
+      expect(result.data?.subscription.status).toBe('CANCELLED');
     });
 
     it('throws error when cancelling already cancelled subscription', async () => {
       const context = createTestContext();
       const input = {
-        subscription_id: 'data-subscription-id',
+        subscription_id: TEST_SUBSCRIPTION_ID,
         action: 'cancel',
       };
 
-      vi.mocked(prisma.subscription.findUnique).mockResolvedValue(
-        createMockDataSubscription({ status: 'CANCELLED' })
+      vi.mocked(prisma.dataSubscription.findUnique).mockResolvedValue(
+        createMockDataSubscription({ status: 'CANCELLED' }) as any
       );
 
       await expect(executeManageSubscription(input, context)).rejects.toThrow();
@@ -274,41 +282,41 @@ describe('manage_subscription tool', () => {
     it('updates subscription name', async () => {
       const context = createTestContext();
       const input = {
-        subscription_id: 'data-subscription-id',
+        subscription_id: TEST_SUBSCRIPTION_ID,
         action: 'update',
         updates: {
           name: 'Updated Subscription Name',
         },
       };
 
-      vi.mocked(prisma.subscription.update).mockResolvedValue(
-        createMockDataSubscription({ name: 'Updated Subscription Name' })
+      vi.mocked(prisma.dataSubscription.update).mockResolvedValue(
+        createMockDataSubscription({ name: 'Updated Subscription Name' }) as any
       );
 
       const result = await executeManageSubscription(input, context);
 
       expect(result.success).toBe(true);
-      expect(result.data?.name).toBe('Updated Subscription Name');
+      expect(result.data?.subscription.name).toBe('Updated Subscription Name');
     });
 
     it('updates subscription frequency', async () => {
       const context = createTestContext();
       const input = {
-        subscription_id: 'data-subscription-id',
+        subscription_id: TEST_SUBSCRIPTION_ID,
         action: 'update',
         updates: {
           frequency: 'monthly',
         },
       };
 
-      vi.mocked(prisma.subscription.update).mockResolvedValue(
-        createMockDataSubscription({ frequency: 'MONTHLY' })
+      vi.mocked(prisma.dataSubscription.update).mockResolvedValue(
+        createMockDataSubscription({ frequency: 'MONTHLY' }) as any
       );
 
       const result = await executeManageSubscription(input, context);
 
       expect(result.success).toBe(true);
-      expect(prisma.subscription.update).toHaveBeenCalledWith(
+      expect(prisma.dataSubscription.update).toHaveBeenCalledWith(
         expect.objectContaining({
           data: expect.objectContaining({ frequency: 'MONTHLY' }),
         })
@@ -318,7 +326,7 @@ describe('manage_subscription tool', () => {
     it('updates subscription geography', async () => {
       const context = createTestContext();
       const input = {
-        subscription_id: 'data-subscription-id',
+        subscription_id: TEST_SUBSCRIPTION_ID,
         action: 'update',
         updates: {
           geography: {
@@ -328,8 +336,8 @@ describe('manage_subscription tool', () => {
         },
       };
 
-      vi.mocked(prisma.subscription.update).mockResolvedValue(
-        createMockDataSubscription({ geography: { type: 'state', values: ['AZ', 'CA'] } })
+      vi.mocked(prisma.dataSubscription.update).mockResolvedValue(
+        createMockDataSubscription({ geography: { type: 'state', values: ['AZ', 'CA'] } }) as any
       );
 
       const result = await executeManageSubscription(input, context);
@@ -340,7 +348,7 @@ describe('manage_subscription tool', () => {
     it('updates subscription filters', async () => {
       const context = createTestContext();
       const input = {
-        subscription_id: 'data-subscription-id',
+        subscription_id: TEST_SUBSCRIPTION_ID,
         action: 'update',
         updates: {
           filters: {
@@ -357,7 +365,7 @@ describe('manage_subscription tool', () => {
     it('updates fulfillment method', async () => {
       const context = createTestContext();
       const input = {
-        subscription_id: 'data-subscription-id',
+        subscription_id: TEST_SUBSCRIPTION_ID,
         action: 'update',
         updates: {
           fulfillment_method: 'email',
@@ -367,8 +375,8 @@ describe('manage_subscription tool', () => {
         },
       };
 
-      vi.mocked(prisma.subscription.update).mockResolvedValue(
-        createMockDataSubscription({ fulfillmentMethod: 'EMAIL' })
+      vi.mocked(prisma.dataSubscription.update).mockResolvedValue(
+        createMockDataSubscription({ fulfillmentMethod: 'EMAIL' }) as any
       );
 
       const result = await executeManageSubscription(input, context);
@@ -379,9 +387,8 @@ describe('manage_subscription tool', () => {
     it('throws error when updating with no updates provided', async () => {
       const context = createTestContext();
       const input = {
-        subscription_id: 'data-subscription-id',
+        subscription_id: TEST_SUBSCRIPTION_ID,
         action: 'update',
-        updates: {},
       };
 
       await expect(executeManageSubscription(input, context)).rejects.toThrow();
@@ -411,7 +418,7 @@ describe('manage_subscription tool', () => {
     it('throws ValidationError for invalid action', async () => {
       const context = createTestContext();
       const input = {
-        subscription_id: 'data-subscription-id',
+        subscription_id: TEST_SUBSCRIPTION_ID,
         action: 'invalid_action',
       };
 
@@ -421,7 +428,7 @@ describe('manage_subscription tool', () => {
     it('throws ValidationError for missing action', async () => {
       const context = createTestContext();
       const input = {
-        subscription_id: 'data-subscription-id',
+        subscription_id: TEST_SUBSCRIPTION_ID,
       };
 
       await expect(executeManageSubscription(input, context)).rejects.toThrow();
@@ -436,7 +443,7 @@ describe('manage_subscription tool', () => {
         action: 'pause',
       };
 
-      vi.mocked(prisma.subscription.findUnique).mockResolvedValue(null);
+      vi.mocked(prisma.dataSubscription.findUnique).mockResolvedValue(null);
 
       await expect(executeManageSubscription(input, context)).rejects.toThrow(NotFoundError);
     });
@@ -446,40 +453,40 @@ describe('manage_subscription tool', () => {
     it('throws AuthorizationError when subscription belongs to different tenant', async () => {
       const context = createTestContext();
       const input = {
-        subscription_id: 'data-subscription-id',
+        subscription_id: TEST_SUBSCRIPTION_ID,
         action: 'pause',
       };
 
-      vi.mocked(prisma.subscription.findUnique).mockResolvedValue(
-        createMockDataSubscription({ tenantId: 'other-tenant-id' })
+      vi.mocked(prisma.dataSubscription.findUnique).mockResolvedValue(
+        createMockDataSubscription({ tenantId: 'other-tenant-id' }) as any
       );
 
       await expect(executeManageSubscription(input, context)).rejects.toThrow(AuthorizationError);
     });
 
-    it('throws AuthorizationError when missing subscription:update permission', async () => {
+    it('throws AuthorizationError when missing subscription:write permission', async () => {
       const context = createTestContext({
         permissions: ['data:read'],
       });
       const input = {
-        subscription_id: 'data-subscription-id',
+        subscription_id: TEST_SUBSCRIPTION_ID,
         action: 'pause',
       };
 
       await expect(executeManageSubscription(input, context)).rejects.toThrow(AuthorizationError);
     });
 
-    it('allows access with subscription:update permission', async () => {
+    it('allows access with subscription:write permission', async () => {
       const context = createTestContext({
-        permissions: ['subscription:update'],
+        permissions: ['subscription:write'],
       });
       const input = {
-        subscription_id: 'data-subscription-id',
+        subscription_id: TEST_SUBSCRIPTION_ID,
         action: 'pause',
       };
 
-      vi.mocked(prisma.subscription.update).mockResolvedValue(
-        createMockDataSubscription({ status: 'PAUSED' })
+      vi.mocked(prisma.dataSubscription.update).mockResolvedValue(
+        createMockDataSubscription({ status: 'PAUSED', pausedAt: new Date() }) as any
       );
 
       const result = await executeManageSubscription(input, context);
@@ -491,12 +498,12 @@ describe('manage_subscription tool', () => {
         permissions: ['*'],
       });
       const input = {
-        subscription_id: 'data-subscription-id',
+        subscription_id: TEST_SUBSCRIPTION_ID,
         action: 'pause',
       };
 
-      vi.mocked(prisma.subscription.update).mockResolvedValue(
-        createMockDataSubscription({ status: 'PAUSED' })
+      vi.mocked(prisma.dataSubscription.update).mockResolvedValue(
+        createMockDataSubscription({ status: 'PAUSED', pausedAt: new Date() }) as any
       );
 
       const result = await executeManageSubscription(input, context);
@@ -508,41 +515,41 @@ describe('manage_subscription tool', () => {
     it('returns subscription details after pause', async () => {
       const context = createTestContext();
       const input = {
-        subscription_id: 'data-subscription-id',
+        subscription_id: TEST_SUBSCRIPTION_ID,
         action: 'pause',
       };
 
-      vi.mocked(prisma.subscription.update).mockResolvedValue(
-        createMockDataSubscription({ status: 'PAUSED' })
+      vi.mocked(prisma.dataSubscription.update).mockResolvedValue(
+        createMockDataSubscription({ status: 'PAUSED', pausedAt: new Date() }) as any
       );
 
       const result = await executeManageSubscription(input, context);
 
       expect(result.success).toBe(true);
-      expect(result.data?.subscription_id).toBe('data-subscription-id');
-      expect(result.data?.status).toBe('PAUSED');
+      expect(result.data?.subscription.id).toBe(TEST_SUBSCRIPTION_ID);
+      expect(result.data?.subscription.status).toBe('PAUSED');
       expect(result.data?.action_performed).toBe('pause');
     });
 
     it('returns subscription details after update', async () => {
       const context = createTestContext();
       const input = {
-        subscription_id: 'data-subscription-id',
+        subscription_id: TEST_SUBSCRIPTION_ID,
         action: 'update',
         updates: {
           name: 'New Name',
         },
       };
 
-      vi.mocked(prisma.subscription.update).mockResolvedValue(
-        createMockDataSubscription({ name: 'New Name' })
+      vi.mocked(prisma.dataSubscription.update).mockResolvedValue(
+        createMockDataSubscription({ name: 'New Name' }) as any
       );
 
       const result = await executeManageSubscription(input, context);
 
       expect(result.success).toBe(true);
       expect(result.data?.action_performed).toBe('update');
-      expect(result.data?.name).toBe('New Name');
+      expect(result.data?.subscription.name).toBe('New Name');
     });
   });
 
@@ -550,11 +557,11 @@ describe('manage_subscription tool', () => {
     it('handles database errors gracefully', async () => {
       const context = createTestContext();
       const input = {
-        subscription_id: 'data-subscription-id',
+        subscription_id: TEST_SUBSCRIPTION_ID,
         action: 'pause',
       };
 
-      vi.mocked(prisma.subscription.update).mockRejectedValue(new Error('Database error'));
+      vi.mocked(prisma.dataSubscription.update).mockRejectedValue(new Error('Database error'));
 
       await expect(executeManageSubscription(input, context)).rejects.toThrow('Database error');
     });

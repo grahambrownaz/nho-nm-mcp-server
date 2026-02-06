@@ -3,7 +3,7 @@
  * Tests the complete subscription lifecycle from creation to delivery
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { executeCreateSubscription } from '../../src/tools/subscriptions/create-subscription.js';
 import { executeManageSubscription } from '../../src/tools/subscriptions/manage-subscription.js';
 import { executeListSubscriptions } from '../../src/tools/subscriptions/list-subscriptions.js';
@@ -11,81 +11,190 @@ import { executeDeliveryReport } from '../../src/tools/subscriptions/delivery-re
 import { prisma } from '../../src/db/client.js';
 import type { TenantContext } from '../../src/utils/auth.js';
 
-// Mock Prisma client with connected behavior
-vi.mock('../../src/db/client.js', () => {
-  // In-memory store for subscriptions
-  const subscriptions = new Map<string, any>();
-  const deliveries = new Map<string, any>();
+// In-memory store for subscriptions and deliveries
+const subscriptions = new Map<string, any>();
+const deliveries = new Map<string, any>();
 
-  return {
-    prisma: {
-      template: {
-        findUnique: vi.fn().mockResolvedValue({
-          id: 'template-123',
-          tenantId: 'test-tenant-id',
-          name: 'Test Template',
-        }),
-      },
-      subscription: {
-        create: vi.fn((args: any) => {
-          const sub = {
-            id: `sub-${Date.now()}`,
-            ...args.data,
-            createdAt: new Date(),
-            updatedAt: new Date(),
-          };
-          subscriptions.set(sub.id, sub);
-          return Promise.resolve(sub);
-        }),
-        findUnique: vi.fn((args: any) => {
-          return Promise.resolve(subscriptions.get(args.where.id) || null);
-        }),
-        findMany: vi.fn((args: any) => {
-          const tenantId = args.where.tenantId;
-          const results = Array.from(subscriptions.values()).filter(
-            (s: any) => s.tenantId === tenantId
-          );
-          return Promise.resolve(results);
-        }),
-        update: vi.fn((args: any) => {
-          const sub = subscriptions.get(args.where.id);
-          if (sub) {
-            const updated = { ...sub, ...args.data, updatedAt: new Date() };
-            subscriptions.set(sub.id, updated);
-            return Promise.resolve(updated);
-          }
-          return Promise.resolve(null);
-        }),
-        count: vi.fn((args: any) => {
-          const tenantId = args.where.tenantId;
-          const count = Array.from(subscriptions.values()).filter(
-            (s: any) => s.tenantId === tenantId
-          ).length;
-          return Promise.resolve(count);
-        }),
-      },
-      delivery: {
-        findMany: vi.fn((args: any) => {
-          const tenantId = args.where.tenantId;
-          const results = Array.from(deliveries.values()).filter(
-            (d: any) => d.tenantId === tenantId
-          );
-          return Promise.resolve(results);
-        }),
-        count: vi.fn(() => Promise.resolve(0)),
-      },
-      // Helper to reset state between tests
-      _reset: () => {
-        subscriptions.clear();
-        deliveries.clear();
-      },
-      _addDelivery: (delivery: any) => {
-        deliveries.set(delivery.id, delivery);
-      },
-      _getSubscription: (id: string) => subscriptions.get(id),
+// Valid UUIDs for testing
+const TEST_TEMPLATE_ID = '550e8400-e29b-41d4-a716-446655440000';
+
+// Mock Prisma client with connected behavior
+// Helper to generate UUID
+function generateUUID(): string {
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === 'x' ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
+vi.mock('../../src/db/client.js', () => ({
+  prisma: {
+    template: {
+      findFirst: vi.fn().mockResolvedValue({
+        id: '550e8400-e29b-41d4-a716-446655440000',
+        tenantId: 'test-tenant-id',
+        name: 'Test Template',
+        isPublic: false,
+        isActive: true,
+      }),
+      findUnique: vi.fn().mockResolvedValue({
+        id: '550e8400-e29b-41d4-a716-446655440000',
+        tenantId: 'test-tenant-id',
+        name: 'Test Template',
+        isPublic: false,
+        isActive: true,
+      }),
     },
-  };
-});
+    dataSubscription: {
+      create: vi.fn((args: any) => {
+        // Generate a proper UUID for the subscription ID
+        const id = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+          const r = (Math.random() * 16) | 0;
+          const v = c === 'x' ? r : (r & 0x3) | 0x8;
+          return v.toString(16);
+        });
+        const sub = {
+          id,
+          ...args.data,
+          totalDeliveries: 0,
+          totalRecords: 0,
+          lastDeliveryAt: null,
+          pausedAt: null,
+          cancelledAt: null,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        };
+        subscriptions.set(sub.id, sub);
+        return Promise.resolve(sub);
+      }),
+      findUnique: vi.fn((args: any) => {
+        const sub = subscriptions.get(args.where.id);
+        return Promise.resolve(sub || null);
+      }),
+      findFirst: vi.fn((args: any) => {
+        const sub = subscriptions.get(args.where?.id);
+        return Promise.resolve(sub || null);
+      }),
+      findMany: vi.fn((args: any) => {
+        let results = Array.from(subscriptions.values());
+
+        // Filter by tenant
+        if (args.where?.tenantId) {
+          results = results.filter((s: any) => s.tenantId === args.where.tenantId);
+        }
+
+        // Filter by status
+        if (args.where?.status) {
+          results = results.filter((s: any) => s.status === args.where.status);
+        }
+
+        // Filter by database
+        if (args.where?.database) {
+          results = results.filter((s: any) => s.database === args.where.database);
+        }
+
+        // Filter by client name (contains, case-insensitive)
+        if (args.where?.clientName?.contains) {
+          const searchTerm = args.where.clientName.contains.toLowerCase();
+          results = results.filter(
+            (s: any) => s.clientName && s.clientName.toLowerCase().includes(searchTerm)
+          );
+        }
+
+        // Apply ordering
+        if (args.orderBy?.createdAt === 'desc') {
+          results.sort((a: any, b: any) => b.createdAt.getTime() - a.createdAt.getTime());
+        }
+
+        // Apply pagination
+        const skip = args.skip || 0;
+        const take = args.take || results.length;
+        results = results.slice(skip, skip + take);
+
+        // Add template relation if requested
+        if (args.include?.template) {
+          results = results.map((s: any) => ({
+            ...s,
+            template: s.templateId ? { name: 'Test Template' } : null,
+          }));
+        }
+
+        return Promise.resolve(results);
+      }),
+      update: vi.fn((args: any) => {
+        const sub = subscriptions.get(args.where.id);
+        if (sub) {
+          const updated = { ...sub, ...args.data, updatedAt: new Date() };
+          subscriptions.set(sub.id, updated);
+          return Promise.resolve(updated);
+        }
+        return Promise.resolve(null);
+      }),
+      count: vi.fn((args: any) => {
+        let results = Array.from(subscriptions.values());
+
+        if (args.where?.tenantId) {
+          results = results.filter((s: any) => s.tenantId === args.where.tenantId);
+        }
+        if (args.where?.status) {
+          results = results.filter((s: any) => s.status === args.where.status);
+        }
+
+        return Promise.resolve(results.length);
+      }),
+    },
+    delivery: {
+      findMany: vi.fn((args: any) => {
+        let results = Array.from(deliveries.values());
+
+        if (args.where?.tenantId) {
+          results = results.filter((d: any) => d.tenantId === args.where.tenantId);
+        }
+
+        if (args.where?.dataSubscriptionId) {
+          if (typeof args.where.dataSubscriptionId === 'string') {
+            results = results.filter(
+              (d: any) => d.dataSubscriptionId === args.where.dataSubscriptionId
+            );
+          } else if (args.where.dataSubscriptionId?.in) {
+            results = results.filter((d: any) =>
+              args.where.dataSubscriptionId.in.includes(d.dataSubscriptionId)
+            );
+          }
+        }
+
+        // Filter by scheduledAt date range
+        if (args.where?.scheduledAt?.gte || args.where?.scheduledAt?.lte) {
+          const start = args.where.scheduledAt.gte;
+          const end = args.where.scheduledAt.lte;
+          results = results.filter((d: any) => {
+            const scheduled = new Date(d.scheduledAt);
+            if (start && scheduled < start) return false;
+            if (end && scheduled > end) return false;
+            return true;
+          });
+        }
+
+        // Add dataSubscription relation if requested
+        if (args.include?.dataSubscription) {
+          results = results.map((d: any) => {
+            const sub = subscriptions.get(d.dataSubscriptionId);
+            return {
+              ...d,
+              dataSubscription: sub
+                ? { id: sub.id, name: sub.name, clientName: sub.clientName }
+                : { id: d.dataSubscriptionId, name: 'Unknown', clientName: null },
+            };
+          });
+        }
+
+        return Promise.resolve(results);
+      }),
+      count: vi.fn(() => Promise.resolve(deliveries.size)),
+    },
+  },
+}));
 
 // Mock Decimal type that matches Prisma's Decimal behavior
 function mockDecimal(value: number) {
@@ -140,7 +249,7 @@ function createTestContext(overrides: Partial<TenantContext> = {}): TenantContex
       pricePerRecord: mockDecimal(0.05),
       priceEmailAppend: mockDecimal(0.02),
       pricePhoneAppend: mockDecimal(0.03),
-      pricePdfGeneration: mockDecimal(0.10),
+      pricePdfGeneration: mockDecimal(0.1),
       pricePrintPerPiece: mockDecimal(0.65),
       billingCycleStart: new Date(),
       billingCycleEnd: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
@@ -152,10 +261,21 @@ function createTestContext(overrides: Partial<TenantContext> = {}): TenantContex
   };
 }
 
+// Helper to add delivery to mock store
+function addDelivery(delivery: any) {
+  deliveries.set(delivery.id, delivery);
+}
+
+// Helper to get subscription from mock store
+function getSubscription(id: string) {
+  return subscriptions.get(id);
+}
+
 describe('Subscription Flow Integration Tests', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    (prisma as any)._reset();
+    subscriptions.clear();
+    deliveries.clear();
   });
 
   describe('complete subscription lifecycle', () => {
@@ -173,15 +293,15 @@ describe('Subscription Flow Integration Tests', () => {
         frequency: 'weekly',
         fulfillment_method: 'email',
         fulfillment_config: {
-          email: 'delivery@example.com',
+          email_address: 'delivery@example.com',
         },
       };
 
       const createResult = await executeCreateSubscription(createInput, context);
 
       expect(createResult.success).toBe(true);
-      expect(createResult.data?.subscription_id).toBeDefined();
-      const subscriptionId = createResult.data?.subscription_id;
+      expect(createResult.data?.subscription.id).toBeDefined();
+      const subscriptionId = createResult.data?.subscription.id;
 
       // Step 2: List subscriptions and verify new subscription appears
       const listResult = await executeListSubscriptions({}, context);
@@ -199,7 +319,7 @@ describe('Subscription Flow Integration Tests', () => {
       const pauseResult = await executeManageSubscription(pauseInput, context);
 
       expect(pauseResult.success).toBe(true);
-      expect(pauseResult.data?.status).toBe('PAUSED');
+      expect(pauseResult.data?.subscription.status).toBe('PAUSED');
 
       // Step 4: Resume subscription
       const resumeInput = {
@@ -210,7 +330,7 @@ describe('Subscription Flow Integration Tests', () => {
       const resumeResult = await executeManageSubscription(resumeInput, context);
 
       expect(resumeResult.success).toBe(true);
-      expect(resumeResult.data?.status).toBe('ACTIVE');
+      expect(resumeResult.data?.subscription.status).toBe('ACTIVE');
 
       // Step 5: Cancel subscription
       const cancelInput = {
@@ -221,13 +341,10 @@ describe('Subscription Flow Integration Tests', () => {
       const cancelResult = await executeManageSubscription(cancelInput, context);
 
       expect(cancelResult.success).toBe(true);
-      expect(cancelResult.data?.status).toBe('CANCELLED');
+      expect(cancelResult.data?.subscription.status).toBe('CANCELLED');
 
       // Step 6: Verify final state
-      const finalListResult = await executeListSubscriptions(
-        { status_filter: 'cancelled' },
-        context
-      );
+      const finalListResult = await executeListSubscriptions({ status_filter: 'cancelled' }, context);
 
       expect(finalListResult.success).toBe(true);
       expect(finalListResult.data?.subscriptions.some((s) => s.id === subscriptionId)).toBe(true);
@@ -261,13 +378,10 @@ describe('Subscription Flow Integration Tests', () => {
       );
 
       expect(sub2Result.success).toBe(true);
-      const sub2Id = sub2Result.data?.subscription_id;
+      const sub2Id = sub2Result.data?.subscription.id;
 
       // Pause second subscription
-      await executeManageSubscription(
-        { subscription_id: sub2Id, action: 'pause' },
-        context
-      );
+      await executeManageSubscription({ subscription_id: sub2Id, action: 'pause' }, context);
 
       // Create third subscription (will be cancelled)
       const sub3Result = await executeCreateSubscription(
@@ -281,13 +395,10 @@ describe('Subscription Flow Integration Tests', () => {
       );
 
       expect(sub3Result.success).toBe(true);
-      const sub3Id = sub3Result.data?.subscription_id;
+      const sub3Id = sub3Result.data?.subscription.id;
 
       // Cancel third subscription
-      await executeManageSubscription(
-        { subscription_id: sub3Id, action: 'cancel' },
-        context
-      );
+      await executeManageSubscription({ subscription_id: sub3Id, action: 'cancel' }, context);
 
       // Verify counts
       const allResult = await executeListSubscriptions({ status_filter: 'all' }, context);
@@ -299,7 +410,10 @@ describe('Subscription Flow Integration Tests', () => {
       const pausedResult = await executeListSubscriptions({ status_filter: 'paused' }, context);
       expect(pausedResult.data?.subscriptions).toHaveLength(1);
 
-      const cancelledResult = await executeListSubscriptions({ status_filter: 'cancelled' }, context);
+      const cancelledResult = await executeListSubscriptions(
+        { status_filter: 'cancelled' },
+        context
+      );
       expect(cancelledResult.data?.subscriptions).toHaveLength(1);
     });
 
@@ -317,7 +431,7 @@ describe('Subscription Flow Integration Tests', () => {
         context
       );
 
-      const subscriptionId = createResult.data?.subscription_id;
+      const subscriptionId = createResult.data?.subscription.id;
 
       // Update subscription
       const updateResult = await executeManageSubscription(
@@ -334,10 +448,10 @@ describe('Subscription Flow Integration Tests', () => {
       );
 
       expect(updateResult.success).toBe(true);
-      expect(updateResult.data?.name).toBe('Updated Name');
+      expect(updateResult.data?.subscription.name).toBe('Updated Name');
 
       // Verify changes persisted
-      const sub = (prisma as any)._getSubscription(subscriptionId);
+      const sub = getSubscription(subscriptionId);
       expect(sub.name).toBe('Updated Name');
       expect(sub.frequency).toBe('MONTHLY');
     });
@@ -353,14 +467,17 @@ describe('Subscription Flow Integration Tests', () => {
           database: 'nho',
           geography: { type: 'zip', values: ['85001'] },
           frequency: 'weekly',
-          template_id: 'template-123',
+          template_id: TEST_TEMPLATE_ID,
           fulfillment_method: 'print_mail',
         },
         context
       );
 
       expect(createResult.success).toBe(true);
-      expect(createResult.data?.template_id).toBe('template-123');
+
+      // Verify the subscription was created with template
+      const sub = getSubscription(createResult.data?.subscription.id);
+      expect(sub.templateId).toBe(TEST_TEMPLATE_ID);
     });
   });
 
@@ -379,39 +496,50 @@ describe('Subscription Flow Integration Tests', () => {
         context
       );
 
-      const subscriptionId = createResult.data?.subscription_id;
+      const subscriptionId = createResult.data?.subscription.id;
 
-      // Add mock deliveries
-      (prisma as any)._addDelivery({
+      // Add mock deliveries - both within this month
+      const now = new Date();
+      const twoDaysAgo = new Date(now.getTime() - 2 * 24 * 60 * 60 * 1000);
+
+      addDelivery({
         id: 'delivery-1',
-        subscriptionId,
+        dataSubscriptionId: subscriptionId,
         tenantId: 'test-tenant-id',
         recordCount: 100,
+        newRecordsCount: 100,
         status: 'COMPLETED',
-        deliveredAt: new Date(),
-        cost: mockDecimal(5.0),
-        subscription: { id: subscriptionId, name: 'Delivery Test', database: 'NHO' },
-        createdAt: new Date(),
+        scheduledAt: now,
+        completedAt: now,
+        dataCost: mockDecimal(5.0),
+        pdfCost: mockDecimal(0),
+        fulfillmentCost: mockDecimal(0),
+        totalCost: mockDecimal(5.0),
+        createdAt: now,
       });
 
-      (prisma as any)._addDelivery({
+      addDelivery({
         id: 'delivery-2',
-        subscriptionId,
+        dataSubscriptionId: subscriptionId,
         tenantId: 'test-tenant-id',
         recordCount: 95,
+        newRecordsCount: 95,
         status: 'COMPLETED',
-        deliveredAt: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000),
-        cost: mockDecimal(4.75),
-        subscription: { id: subscriptionId, name: 'Delivery Test', database: 'NHO' },
-        createdAt: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000),
+        scheduledAt: twoDaysAgo,
+        completedAt: twoDaysAgo,
+        dataCost: mockDecimal(4.75),
+        pdfCost: mockDecimal(0),
+        fulfillmentCost: mockDecimal(0),
+        totalCost: mockDecimal(4.75),
+        createdAt: twoDaysAgo,
       });
 
       // Generate report
       const reportResult = await executeDeliveryReport({ period: 'this_month' }, context);
 
       expect(reportResult.success).toBe(true);
-      expect(reportResult.data?.deliveries.length).toBe(2);
-      expect(reportResult.data?.summary?.total_records).toBe(195);
+      expect(reportResult.data?.deliveries?.length).toBe(2);
+      expect(reportResult.data?.summary?.totalRecords).toBe(195);
     });
   });
 
@@ -465,11 +593,13 @@ describe('Subscription Flow Integration Tests', () => {
 
       // Filter by NHO
       const nhoResult = await executeListSubscriptions({ database_filter: 'nho' }, context);
-      expect(nhoResult.data?.subscriptions.every((s) => s.database === 'NHO')).toBe(true);
+      expect(nhoResult.data?.subscriptions.length).toBe(1);
+      expect(nhoResult.data?.subscriptions[0].database).toBe('nho');
 
       // Filter by New Mover
       const nmResult = await executeListSubscriptions({ database_filter: 'new_mover' }, context);
-      expect(nmResult.data?.subscriptions.every((s) => s.database === 'NEW_MOVER')).toBe(true);
+      expect(nmResult.data?.subscriptions.length).toBe(1);
+      expect(nmResult.data?.subscriptions[0].database).toBe('new_mover');
     });
   });
 
@@ -484,7 +614,7 @@ describe('Subscription Flow Integration Tests', () => {
           database: 'nho',
           geography: { type: 'state', values: ['AZ'] },
           frequency: 'weekly',
-          client_info: { name: 'Client A', identifier: 'CA001' },
+          client_info: { name: 'Client A' },
         },
         context
       );
@@ -496,22 +626,20 @@ describe('Subscription Flow Integration Tests', () => {
           database: 'nho',
           geography: { type: 'state', values: ['CA'] },
           frequency: 'weekly',
-          client_info: { name: 'Client B', identifier: 'CB001' },
+          client_info: { name: 'Client B' },
         },
         context
       );
 
       // Filter by Client A
-      const clientAResult = await executeListSubscriptions({ client_filter: 'CA001' }, context);
-      expect(clientAResult.data?.subscriptions.every(
-        (s) => s.client_info?.identifier === 'CA001'
-      )).toBe(true);
+      const clientAResult = await executeListSubscriptions({ client_filter: 'Client A' }, context);
+      expect(clientAResult.data?.subscriptions.length).toBe(1);
+      expect(clientAResult.data?.subscriptions[0].clientName).toBe('Client A');
 
       // Filter by Client B
-      const clientBResult = await executeListSubscriptions({ client_filter: 'CB001' }, context);
-      expect(clientBResult.data?.subscriptions.every(
-        (s) => s.client_info?.identifier === 'CB001'
-      )).toBe(true);
+      const clientBResult = await executeListSubscriptions({ client_filter: 'Client B' }, context);
+      expect(clientBResult.data?.subscriptions.length).toBe(1);
+      expect(clientBResult.data?.subscriptions[0].clientName).toBe('Client B');
     });
   });
 });
