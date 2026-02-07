@@ -63,7 +63,9 @@ Delivery methods:
 - batch_sftp: Periodic SFTP upload
 - api_poll: You poll the API for new signals
 
-For webhook delivery, first configure a webhook using configure_intent_webhook.`,
+For webhook delivery, first configure a webhook using configure_intent_webhook.
+
+IMPORTANT - geography parameter format: MUST include "type" and "values" fields. Example: {"type": "zip", "values": ["85255"]} or {"type": "state", "values": ["AZ"]} or {"type": "nationwide"}`,
   inputSchema: {
     type: 'object' as const,
     properties: {

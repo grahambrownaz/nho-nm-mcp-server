@@ -44,10 +44,10 @@ describe('get_recommendations tool', () => {
   const context = createTestContext();
 
   describe('valid inputs', () => {
-    it('returns success for valid input', async () => {
+    it('returns success for valid input with business_type', async () => {
       const input = {
+        business_type: 'end_user',
         industry: 'realtor',
-        role: 'business_owner',
         goals: ['find_new_customers'],
       };
 
@@ -57,10 +57,22 @@ describe('get_recommendations tool', () => {
       expect(result.data).toBeDefined();
     });
 
+    it('returns success without industry (optional)', async () => {
+      const input = {
+        business_type: 'tech_developer',
+        goals: ['api_integration'],
+      };
+
+      const result = await executeGetRecommendations(input, context);
+
+      expect(result.success).toBe(true);
+      expect(result.data.your_profile.industry).toBeNull();
+    });
+
     it('returns all expected sections', async () => {
       const input = {
+        business_type: 'end_user',
         industry: 'hvac',
-        role: 'sales_marketing',
         goals: ['find_new_customers', 'direct_mail'],
       };
 
@@ -68,6 +80,8 @@ describe('get_recommendations tool', () => {
 
       expect(result.data.welcome_message).toBeDefined();
       expect(result.data.your_profile).toBeDefined();
+      expect(result.data.your_profile.business_type).toBeDefined();
+      expect(result.data.your_profile.business_type_description).toBeDefined();
       expect(result.data.recommended_workflows).toBeDefined();
       expect(result.data.quick_wins).toBeDefined();
       expect(result.data.available_categories).toBeDefined();
@@ -76,10 +90,22 @@ describe('get_recommendations tool', () => {
   });
 
   describe('profile display', () => {
+    it('maps business_type to display name', async () => {
+      const input = {
+        business_type: 'print_company',
+        goals: ['offer_data_to_clients'],
+      };
+
+      const result = await executeGetRecommendations(input, context);
+
+      expect(result.data.your_profile.business_type).toBe('Print & Mail Company');
+      expect(result.data.your_profile.business_type_description).toContain('data + print');
+    });
+
     it('maps industry to display name', async () => {
       const input = {
+        business_type: 'end_user',
         industry: 'realtor',
-        role: 'business_owner',
         goals: ['find_new_customers'],
       };
 
@@ -88,22 +114,10 @@ describe('get_recommendations tool', () => {
       expect(result.data.your_profile.industry).toBe('Real Estate');
     });
 
-    it('maps role to display name', async () => {
-      const input = {
-        industry: 'hvac',
-        role: 'sales_marketing',
-        goals: ['direct_mail'],
-      };
-
-      const result = await executeGetRecommendations(input, context);
-
-      expect(result.data.your_profile.role).toBe('Sales & Marketing');
-    });
-
     it('maps goals to display names', async () => {
       const input = {
+        business_type: 'end_user',
         industry: 'insurance',
-        role: 'business_owner',
         goals: ['find_new_customers', 'email_campaigns'],
       };
 
@@ -113,10 +127,10 @@ describe('get_recommendations tool', () => {
       expect(result.data.your_profile.goals).toContain('Email Campaigns');
     });
 
-    it('includes welcome message with industry and role', async () => {
+    it('includes welcome message with business type and industry', async () => {
       const input = {
+        business_type: 'end_user',
         industry: 'landscaping',
-        role: 'business_owner',
         goals: ['direct_mail'],
       };
 
@@ -125,13 +139,24 @@ describe('get_recommendations tool', () => {
       expect(result.data.welcome_message).toContain('Business Owner');
       expect(result.data.welcome_message).toContain('Landscaping');
     });
+
+    it('includes welcome message without industry for tech developers', async () => {
+      const input = {
+        business_type: 'tech_developer',
+        goals: ['api_integration'],
+      };
+
+      const result = await executeGetRecommendations(input, context);
+
+      expect(result.data.welcome_message).toContain('Developer');
+    });
   });
 
-  describe('workflow filtering', () => {
-    it('returns realtor workflows for realtor + find_new_customers', async () => {
+  describe('business type workflow filtering', () => {
+    it('returns end_user workflows for end_user + find_new_customers', async () => {
       const input = {
+        business_type: 'end_user',
         industry: 'realtor',
-        role: 'business_owner',
         goals: ['find_new_customers'],
       };
 
@@ -142,10 +167,88 @@ describe('get_recommendations tool', () => {
       expect(workflowNames).toContain('New Mover Welcome Campaign');
     });
 
+    it('returns print-specific workflows for print_company', async () => {
+      const input = {
+        business_type: 'print_company',
+        goals: ['offer_data_to_clients', 'automated_delivery'],
+      };
+
+      const result = await executeGetRecommendations(input, context);
+
+      const workflowNames = result.data.recommended_workflows.map((w) => w.name);
+      expect(workflowNames).toContain('Data + Print Service for Your Clients');
+      expect(workflowNames).toContain('SFTP Hot Folder Integration');
+    });
+
+    it('returns agency-specific workflows for agency', async () => {
+      const input = {
+        business_type: 'agency',
+        goals: ['offer_data_to_clients', 'direct_mail'],
+      };
+
+      const result = await executeGetRecommendations(input, context);
+
+      const workflowNames = result.data.recommended_workflows.map((w) => w.name);
+      expect(workflowNames).toContain('Multi-Client Campaign Management');
+    });
+
+    it('returns developer-specific workflows for tech_developer', async () => {
+      const input = {
+        business_type: 'tech_developer',
+        goals: ['api_integration'],
+      };
+
+      const result = await executeGetRecommendations(input, context);
+
+      const workflowNames = result.data.recommended_workflows.map((w) => w.name);
+      expect(workflowNames).toContain('API & Data Integration');
+    });
+
+    it('returns reseller-specific workflows for reseller', async () => {
+      const input = {
+        business_type: 'reseller',
+        goals: ['white_label', 'offer_data_to_clients'],
+      };
+
+      const result = await executeGetRecommendations(input, context);
+
+      const workflowNames = result.data.recommended_workflows.map((w) => w.name);
+      expect(workflowNames).toContain('White-Label Reseller Setup');
+    });
+
+    it('does not show print workflows to end_user', async () => {
+      const input = {
+        business_type: 'end_user',
+        industry: 'hvac',
+        goals: ['find_new_customers', 'direct_mail'],
+      };
+
+      const result = await executeGetRecommendations(input, context);
+
+      const workflowNames = result.data.recommended_workflows.map((w) => w.name);
+      expect(workflowNames).not.toContain('Data + Print Service for Your Clients');
+      expect(workflowNames).not.toContain('SFTP Hot Folder Integration');
+    });
+
+    it('does not show agency workflows to end_user', async () => {
+      const input = {
+        business_type: 'end_user',
+        industry: 'insurance',
+        goals: ['find_new_customers'],
+      };
+
+      const result = await executeGetRecommendations(input, context);
+
+      const workflowNames = result.data.recommended_workflows.map((w) => w.name);
+      expect(workflowNames).not.toContain('Multi-Client Campaign Management');
+    });
+  });
+
+  describe('industry workflow filtering', () => {
     it('includes email workflow when email_campaigns is a goal', async () => {
       const input = {
+        business_type: 'end_user',
         industry: 'insurance',
-        role: 'sales_marketing',
         goals: ['email_campaigns'],
       };
 
@@ -157,8 +260,8 @@ describe('get_recommendations tool', () => {
 
     it('includes intent workflow when intent_data is a goal', async () => {
       const input = {
+        business_type: 'end_user',
         industry: 'hvac',
-        role: 'business_owner',
         goals: ['intent_data'],
       };
 
@@ -168,51 +271,10 @@ describe('get_recommendations tool', () => {
       expect(workflowNames).toContain('Intent-Based Prospecting');
     });
 
-    it('filters workflows by industry match', async () => {
-      const input = {
-        industry: 'retail',
-        role: 'business_owner',
-        goals: ['find_new_customers', 'direct_mail'],
-      };
-
-      const result = await executeGetRecommendations(input, context);
-
-      // Retail should get new mover but not new homeowner postcards
-      // (new_homeowner_postcards doesn't include retail in its industries)
-      const workflowNames = result.data.recommended_workflows.map((w) => w.name);
-      expect(workflowNames).toContain('New Mover Welcome Campaign');
-    });
-
-    it('includes agency workflow only for marketing_agency', async () => {
-      const input = {
-        industry: 'marketing_agency',
-        role: 'agency_reseller',
-        goals: ['automated_delivery'],
-      };
-
-      const result = await executeGetRecommendations(input, context);
-
-      const workflowNames = result.data.recommended_workflows.map((w) => w.name);
-      expect(workflowNames).toContain('Agency/Reseller Multi-Client Setup');
-    });
-
-    it('does not include agency workflow for non-agency industries', async () => {
-      const input = {
-        industry: 'hvac',
-        role: 'business_owner',
-        goals: ['automated_delivery'],
-      };
-
-      const result = await executeGetRecommendations(input, context);
-
-      const workflowNames = result.data.recommended_workflows.map((w) => w.name);
-      expect(workflowNames).not.toContain('Agency/Reseller Multi-Client Setup');
-    });
-
     it('sorts workflows by goal relevance', async () => {
       const input = {
+        business_type: 'end_user',
         industry: 'insurance',
-        role: 'sales_marketing',
         goals: ['find_new_customers', 'email_campaigns'],
       };
 
@@ -223,11 +285,50 @@ describe('get_recommendations tool', () => {
     });
   });
 
+  describe('new industries', () => {
+    it('supports solar industry', async () => {
+      const input = {
+        business_type: 'end_user',
+        industry: 'solar',
+        goals: ['find_new_customers'],
+      };
+
+      const result = await executeGetRecommendations(input, context);
+
+      expect(result.data.your_profile.industry).toBe('Solar');
+      expect(result.data.recommended_workflows.length).toBeGreaterThan(0);
+    });
+
+    it('supports roofing industry', async () => {
+      const input = {
+        business_type: 'end_user',
+        industry: 'roofing',
+        goals: ['direct_mail'],
+      };
+
+      const result = await executeGetRecommendations(input, context);
+
+      expect(result.data.your_profile.industry).toBe('Roofing');
+    });
+
+    it('supports dental industry', async () => {
+      const input = {
+        business_type: 'end_user',
+        industry: 'dental',
+        goals: ['find_new_customers'],
+      };
+
+      const result = await executeGetRecommendations(input, context);
+
+      expect(result.data.your_profile.industry).toBe('Dental');
+    });
+  });
+
   describe('include_examples flag', () => {
     it('includes step details when include_examples is true', async () => {
       const input = {
+        business_type: 'end_user',
         industry: 'realtor',
-        role: 'business_owner',
         goals: ['find_new_customers'],
         include_examples: true,
       };
@@ -242,8 +343,8 @@ describe('get_recommendations tool', () => {
 
     it('omits step details when include_examples is false', async () => {
       const input = {
+        business_type: 'end_user',
         industry: 'realtor',
-        role: 'business_owner',
         goals: ['find_new_customers'],
         include_examples: false,
       };
@@ -256,8 +357,8 @@ describe('get_recommendations tool', () => {
 
     it('defaults to include_examples true', async () => {
       const input = {
+        business_type: 'end_user',
         industry: 'realtor',
-        role: 'business_owner',
         goals: ['find_new_customers'],
       };
 
@@ -269,10 +370,10 @@ describe('get_recommendations tool', () => {
   });
 
   describe('quick wins', () => {
-    it('returns quick wins matching role and goals', async () => {
+    it('returns quick wins matching business type and goals', async () => {
       const input = {
+        business_type: 'end_user',
         industry: 'hvac',
-        role: 'business_owner',
         goals: ['find_new_customers'],
       };
 
@@ -286,8 +387,8 @@ describe('get_recommendations tool', () => {
 
     it('returns max 4 quick wins', async () => {
       const input = {
+        business_type: 'end_user',
         industry: 'realtor',
-        role: 'business_owner',
         goals: ['find_new_customers', 'direct_mail', 'email_campaigns', 'data_enrichment'],
       };
 
@@ -296,10 +397,9 @@ describe('get_recommendations tool', () => {
       expect(result.data.quick_wins.length).toBeLessThanOrEqual(4);
     });
 
-    it('includes developer-relevant quick wins for developer role', async () => {
+    it('includes developer-relevant quick wins for tech_developer', async () => {
       const input = {
-        industry: 'other',
-        role: 'developer',
+        business_type: 'tech_developer',
         goals: ['data_enrichment'],
       };
 
@@ -308,13 +408,25 @@ describe('get_recommendations tool', () => {
       const tools = result.data.quick_wins.map((qw) => qw.tool);
       expect(tools).toContain('get_sample_data');
     });
+
+    it('includes pricing quick win for print_company', async () => {
+      const input = {
+        business_type: 'print_company',
+        goals: ['offer_data_to_clients'],
+      };
+
+      const result = await executeGetRecommendations(input, context);
+
+      const tools = result.data.quick_wins.map((qw) => qw.tool);
+      expect(tools).toContain('get_pricing');
+    });
   });
 
   describe('category relevance scoring', () => {
     it('marks matching categories as high relevance', async () => {
       const input = {
+        business_type: 'end_user',
         industry: 'realtor',
-        role: 'business_owner',
         goals: ['direct_mail'],
       };
 
@@ -328,8 +440,8 @@ describe('get_recommendations tool', () => {
 
     it('sorts categories by relevance (high first)', async () => {
       const input = {
+        business_type: 'end_user',
         industry: 'insurance',
-        role: 'sales_marketing',
         goals: ['find_new_customers'],
       };
 
@@ -346,8 +458,8 @@ describe('get_recommendations tool', () => {
 
     it('includes all categories regardless of relevance', async () => {
       const input = {
+        business_type: 'end_user',
         industry: 'hvac',
-        role: 'business_owner',
         goals: ['direct_mail'],
       };
 
@@ -356,13 +468,27 @@ describe('get_recommendations tool', () => {
       // Should have all 10 categories
       expect(result.data.available_categories.length).toBe(10);
     });
+
+    it('considers business type in relevance scoring', async () => {
+      const input = {
+        business_type: 'tech_developer',
+        goals: ['api_integration'],
+      };
+
+      const result = await executeGetRecommendations(input, context);
+
+      // Email campaigns should be low relevance for tech_developer
+      const emailCat = result.data.available_categories.find(
+        (c) => c.category === 'Email Campaigns'
+      );
+      expect(emailCat?.relevance).toBe('low');
+    });
   });
 
   describe('next step recommendation', () => {
     it('always includes a next_step', async () => {
       const input = {
-        industry: 'other',
-        role: 'business_owner',
+        business_type: 'end_user',
         goals: ['find_new_customers'],
       };
 
@@ -375,8 +501,8 @@ describe('get_recommendations tool', () => {
 
     it('suggests preview_count for direct_mail goal', async () => {
       const input = {
+        business_type: 'end_user',
         industry: 'realtor',
-        role: 'business_owner',
         goals: ['direct_mail'],
       };
 
@@ -387,8 +513,8 @@ describe('get_recommendations tool', () => {
 
     it('suggests configure_email_account for email_campaigns goal', async () => {
       const input = {
+        business_type: 'end_user',
         industry: 'insurance',
-        role: 'sales_marketing',
         goals: ['email_campaigns'],
       };
 
@@ -399,8 +525,8 @@ describe('get_recommendations tool', () => {
 
     it('suggests list_intent_categories for intent_data goal', async () => {
       const input = {
+        business_type: 'end_user',
         industry: 'hvac',
-        role: 'business_owner',
         goals: ['intent_data'],
       };
 
@@ -409,11 +535,10 @@ describe('get_recommendations tool', () => {
       expect(result.data.next_step.tool).toBe('list_intent_categories');
     });
 
-    it('suggests get_sample_data for developer role as fallback', async () => {
+    it('suggests get_sample_data for tech_developer', async () => {
       const input = {
-        industry: 'other',
-        role: 'developer',
-        goals: ['find_new_customers'],
+        business_type: 'tech_developer',
+        goals: ['api_integration'],
       };
 
       const result = await executeGetRecommendations(input, context);
@@ -421,11 +546,43 @@ describe('get_recommendations tool', () => {
       expect(result.data.next_step.tool).toBe('get_sample_data');
     });
 
-    it('suggests get_pricing for agency_reseller role as fallback', async () => {
+    it('suggests get_pricing for reseller', async () => {
       const input = {
-        industry: 'marketing_agency',
-        role: 'agency_reseller',
-        goals: ['find_new_customers'],
+        business_type: 'reseller',
+        goals: ['white_label'],
+      };
+
+      const result = await executeGetRecommendations(input, context);
+
+      expect(result.data.next_step.tool).toBe('get_pricing');
+    });
+
+    it('suggests get_pricing for print_company with offer_data_to_clients', async () => {
+      const input = {
+        business_type: 'print_company',
+        goals: ['offer_data_to_clients'],
+      };
+
+      const result = await executeGetRecommendations(input, context);
+
+      expect(result.data.next_step.tool).toBe('get_pricing');
+    });
+
+    it('suggests configure_delivery for print_company without offer_data_to_clients', async () => {
+      const input = {
+        business_type: 'print_company',
+        goals: ['automated_delivery'],
+      };
+
+      const result = await executeGetRecommendations(input, context);
+
+      expect(result.data.next_step.tool).toBe('configure_delivery');
+    });
+
+    it('suggests get_pricing for agency with offer_data_to_clients', async () => {
+      const input = {
+        business_type: 'agency',
+        goals: ['offer_data_to_clients'],
       };
 
       const result = await executeGetRecommendations(input, context);
@@ -435,8 +592,8 @@ describe('get_recommendations tool', () => {
 
     it('suggests configure_platform_connection for crm_sync goal', async () => {
       const input = {
+        business_type: 'end_user',
         industry: 'realtor',
-        role: 'sales_marketing',
         goals: ['crm_sync'],
       };
 
@@ -447,20 +604,19 @@ describe('get_recommendations tool', () => {
   });
 
   describe('input validation', () => {
-    it('throws error for invalid industry', async () => {
+    it('throws error for invalid business_type', async () => {
       const input = {
-        industry: 'invalid_industry',
-        role: 'business_owner',
+        business_type: 'invalid_type',
         goals: ['find_new_customers'],
       };
 
       await expect(executeGetRecommendations(input, context)).rejects.toThrow();
     });
 
-    it('throws error for invalid role', async () => {
+    it('throws error for invalid industry', async () => {
       const input = {
-        industry: 'realtor',
-        role: 'invalid_role',
+        business_type: 'end_user',
+        industry: 'invalid_industry',
         goals: ['find_new_customers'],
       };
 
@@ -469,8 +625,7 @@ describe('get_recommendations tool', () => {
 
     it('throws error for invalid goal', async () => {
       const input = {
-        industry: 'realtor',
-        role: 'business_owner',
+        business_type: 'end_user',
         goals: ['invalid_goal'],
       };
 
@@ -479,17 +634,16 @@ describe('get_recommendations tool', () => {
 
     it('throws error for empty goals array', async () => {
       const input = {
-        industry: 'realtor',
-        role: 'business_owner',
+        business_type: 'end_user',
         goals: [],
       };
 
       await expect(executeGetRecommendations(input, context)).rejects.toThrow();
     });
 
-    it('throws error for missing required fields', async () => {
+    it('throws error for missing business_type', async () => {
       const input = {
-        industry: 'realtor',
+        goals: ['find_new_customers'],
       };
 
       await expect(executeGetRecommendations(input, context)).rejects.toThrow();
@@ -503,8 +657,8 @@ describe('get_recommendations tool', () => {
       });
 
       const input = {
+        business_type: 'end_user',
         industry: 'hvac',
-        role: 'business_owner',
         goals: ['find_new_customers'],
       };
 

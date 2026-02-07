@@ -53,7 +53,9 @@ const inputSchema = z.object({
  */
 export const purchaseListTool = {
   name: 'purchase_list',
-  description: `One-time list purchase flow. Queries the specified database with geography and filters, calculates pricing with volume discounts, and generates a Stripe Payment Link for checkout. Returns a quote with payment URL. After payment, the list is exported and delivered via the specified method.`,
+  description: `One-time list purchase flow. Queries the specified database with geography and filters, calculates pricing with volume discounts, and generates a Stripe Payment Link for checkout. Returns a quote with payment URL. After payment, the list is exported and delivered via the specified method.
+
+IMPORTANT - geography parameter format: MUST include "type" and "values" fields. Example: {"type": "zip", "values": ["85255"]} or {"type": "state", "values": ["AZ"]} or {"type": "nationwide"}`,
   inputSchema: {
     type: 'object' as const,
     properties: {

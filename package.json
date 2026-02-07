@@ -19,7 +19,9 @@
     "db:seed-templates": "tsx src/templates/seed-templates.ts",
     "db:studio": "prisma studio",
     "lint": "eslint src --ext .ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "chat:dev": "cd web-chat && npm run dev",
+    "chat:build": "cd web-chat && npm run build"
   },
   "keywords": [
     "mcp",

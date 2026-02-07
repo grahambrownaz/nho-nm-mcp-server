@@ -34,7 +34,9 @@ Intent signals include:
 - Signal type (search, click, form_submit, comparison, review, purchase_abandon)
 - Signal timestamp and recency
 
-Note: This tool shows available signals but does not charge. Subscribe via create_intent_subscription to receive ongoing signals.`,
+Note: This tool shows available signals but does not charge. Subscribe via create_intent_subscription to receive ongoing signals.
+
+IMPORTANT - geography parameter format: MUST include "type" and "values" fields. Example: {"type": "zip", "values": ["85255"]} or {"type": "state", "values": ["AZ"]} or {"type": "nationwide"}`,
   inputSchema: {
     type: 'object' as const,
     properties: {

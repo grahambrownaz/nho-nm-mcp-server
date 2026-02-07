@@ -258,7 +258,7 @@ export async function executeCreatePaymentLink(
 
     lineItemsResponse.push({
       description: `${postcard_size} Postcards`,
-      quantity: postcard_count,
+      quantity: postcard_count!,
       unit_price: unitPrice,
       total: totalAmount,
     });

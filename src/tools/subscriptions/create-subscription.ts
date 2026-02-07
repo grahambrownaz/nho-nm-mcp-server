@@ -61,7 +61,7 @@ This sets up automatic delivery of NHO/NM data on a schedule.
 Parameters:
 - name: A friendly name for this subscription
 - database: Which database to pull from (nho, new_mover, consumer, business)
-- geography: Geographic filter (same format as search_data)
+- geography: Geographic filter. MUST include "type" and "values" fields. Example: {"type": "zip", "values": ["85255"]} or {"type": "state", "values": ["AZ"]} or {"type": "nationwide"}
 - filters: Optional demographic filters
 - frequency: How often to deliver (daily, weekly, biweekly, monthly)
 - template_id: Optional postcard template to use for PDF generation

@@ -33,7 +33,17 @@ Returns:
 - estimated_weekly: Estimated new records added per week
 - estimated_monthly: Estimated new records added per month
 - geography_summary: Human-readable summary of the geography
-- filters_applied: Whether any demographic filters were applied`,
+- filters_applied: Whether any demographic filters were applied
+
+IMPORTANT - geography parameter format:
+The geography object MUST include a "type" field and a "values" array.
+Examples:
+- By ZIP: {"type": "zip", "values": ["85255", "85260"]}
+- By city: {"type": "city", "values": ["Phoenix", "Scottsdale"]}
+- By state: {"type": "state", "values": ["AZ", "CA"]}
+- By county: {"type": "county", "values": ["Maricopa"]}
+- Nationwide: {"type": "nationwide"}
+- By radius: {"type": "radius", "center": {"lat": 33.5, "lng": -111.9}, "radiusMiles": 25}`,
 
   inputSchema: {
     type: 'object',

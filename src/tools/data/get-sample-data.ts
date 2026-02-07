@@ -32,7 +32,15 @@ Important notes:
 - Returns 1-10 sample records (default 5)
 - Email and phone are NOT included in samples
 - Samples are representative but not deliverable addresses
-- Use search_data for actual deliverable records`,
+- Use search_data for actual deliverable records
+
+IMPORTANT - geography parameter format:
+The geography object MUST include a "type" field and a "values" array.
+Examples:
+- By ZIP: {"type": "zip", "values": ["85255"]}
+- By city: {"type": "city", "values": ["Phoenix"]}
+- By state: {"type": "state", "values": ["AZ"]}
+- Nationwide: {"type": "nationwide"}`,
 
   inputSchema: {
     type: 'object',

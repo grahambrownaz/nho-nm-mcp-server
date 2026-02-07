@@ -33,15 +33,17 @@ Supported databases:
 - consumer: General consumer database
 - business: Business database
 
-Geography options:
-- zip: Search by ZIP codes (e.g., ["85001", "85002"])
-- city: Search by city names (e.g., ["Phoenix", "Tucson"])
-- county: Search by county names
-- state: Search by state codes (e.g., ["AZ", "CA"])
-- radius: Search within X miles of a point
-- nationwide: Search entire US
+Use preview_count first to estimate record counts before pulling data.
 
-Use preview_count first to estimate record counts before pulling data.`,
+IMPORTANT - geography parameter format:
+The geography object MUST include a "type" field and a "values" array.
+Examples:
+- By ZIP: {"type": "zip", "values": ["85001", "85002"]}
+- By city: {"type": "city", "values": ["Phoenix", "Tucson"]}
+- By state: {"type": "state", "values": ["AZ", "CA"]}
+- By county: {"type": "county", "values": ["Maricopa"]}
+- Nationwide: {"type": "nationwide"}
+- By radius: {"type": "radius", "center": {"lat": 33.5, "lng": -111.9}, "radiusMiles": 25}`,
 
   inputSchema: {
     type: 'object',
