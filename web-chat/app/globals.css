@@ -148,3 +148,19 @@ body {
 .typing-dot:nth-child(3) {
   animation-delay: 0.4s;
 }
+
+/* Spin animation for loading icons */
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* Builder form scrollbar */
+.builder-form::-webkit-scrollbar {
+  width: 4px;
+}
+
+.builder-form::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 2px;
+}
