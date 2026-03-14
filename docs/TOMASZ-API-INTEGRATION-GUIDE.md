@@ -1476,3 +1476,62 @@ PORT=3000
 5. Are there webhook capabilities for real-time new record notifications?
 6. What's the maximum batch size per API call?
 7. Is there a sandbox/staging environment for testing?
+
+---
+
+## NEW: Franchise & Dealer Network Model (Added March 2026)
+
+### Overview
+
+6 new tools enabling franchise/dealer brands to create self-service marketing hubs. Each brand (e.g., McDonalds, Pentair, State Farm) registers, uploads approved creative, then adds stores. Each store gets an AI-powered MCP connection for buying data and running campaigns — all scoped to their local area.
+
+### New Tools (47 total now)
+
+| Tool | Purpose | API Needed |
+|------|---------|------------|
+| `register_franchise_brand` | Franchisor registers brand (logo, colors, defaults) | DB only |
+| `setup_franchise_store` | Add store with location + manager | DB only |
+| `upload_franchise_creative` | Upload HQ-approved templates | DB only |
+| `franchise_dashboard` | HQ view of all store activity/spend | DB only |
+| `list_franchise_stores` | List stores with status/activity | DB only |
+| `list_franchise_creative` | Browse available creative assets | DB only |
+
+### Schema Additions
+
+3 new tables in `prisma/schema.prisma`:
+- `franchise_brands` — brand identity, branding, billing model, defaults
+- `franchise_stores` — per-location tenant with geo coordinates
+- `franchise_creatives` — HQ-approved postcard/email/letter templates
+
+### No External API Needed
+
+These tools are entirely database-driven. Once PostgreSQL is connected, they work. The franchise model uses the existing `Tenant` hierarchy (`parentTenantId`) for store → franchisor relationships.
+
+### How It Works
+
+```
+1. McDonalds HQ → register_franchise_brand (name, logo, colors)
+2. McDonalds HQ → upload_franchise_creative (approved postcard designs)
+3. McDonalds HQ → setup_franchise_store × N (each store location)
+4. Store Manager → Adds MCP to ChatGPT using branded connect page
+5. Store Manager → "Send new mover postcards within 5 miles"
+6. MCP Server → search_data (auto-scoped to store radius)
+              → generates postcard using HQ-approved creative
+              → Stripe payment link
+              → print_mail fulfillment
+```
+
+### Files
+
+```
+src/tools/franchise/
+├── index.ts              — exports all tools
+├── register-brand.ts     — register_franchise_brand
+├── setup-store.ts        — setup_franchise_store
+├── upload-creative.ts    — upload_franchise_creative
+├── dashboard.ts          — franchise_dashboard
+├── list-creative.ts      — list_franchise_creative
+└── list-stores.ts        — list_franchise_stores
+
+src/types/franchise.ts    — TypeScript interfaces
+```

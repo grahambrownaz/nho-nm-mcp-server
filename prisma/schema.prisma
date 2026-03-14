@@ -50,6 +50,10 @@ model Tenant {
   swotspotAudits      SwotspotAudit[]
   swotspotCompetitors SwotspotCompetitor[]
 
+  // Franchise relations
+  ownedBrands       FranchiseBrand[] @relation("FranchiseOwner")
+  franchiseStore    FranchiseStore?  @relation("FranchiseStore")
+
   @@index([parentTenantId])
   @@map("tenants")
 }
@@ -1053,4 +1057,181 @@ enum SwotspotAuditStatus {
   PROCESSING
   COMPLETED
   FAILED
+}
+
+// ============================================================================
+// FRANCHISE & DEALER NETWORK
+// ============================================================================
+
+model FranchiseBrand {
+  id              String   @id @default(uuid())
+
+  // Brand identity
+  name            String   // e.g., "McDonalds", "Pentair"
+  slug            String   @unique  // URL-safe identifier: "mcdonalds"
+  industry        String?  // e.g., "QSR", "Water Treatment", "Insurance"
+
+  // Owner tenant (the franchisor HQ)
+  ownerTenantId   String
+  ownerTenant     Tenant   @relation("FranchiseOwner", fields: [ownerTenantId], references: [id])
+
+  // Branding
+  logoUrl         String?
+  primaryColor    String?  @default("#000000")
+  secondaryColor  String?  @default("#ffffff")
+  accentColor     String?
+  domain          String?  // Custom domain for connect page
+  supportEmail    String?
+  supportPhone    String?
+  websiteUrl      String?
+
+  // Default data configuration for all stores
+  defaultDatabases    DatabaseType[] @default([NHO, NEW_MOVER, CONSUMER])
+  defaultRadiusMiles  Float    @default(10)  // Default search radius around each store
+
+  // Billing model
+  billingModel    FranchiseBillingModel @default(PER_STORE)
+  stripeAccountId String?  // For Stripe Connect (consolidated billing)
+
+  // MCP endpoint configuration
+  mcpEndpoint     String?  // Custom MCP endpoint URL
+  welcomeMessage  String?  @db.Text  // Custom welcome message in AI chat
+
+  // Limits
+  maxStores       Int      @default(100)
+
+  // Status
+  status          FranchiseBrandStatus @default(ACTIVE)
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  // Relations
+  stores          FranchiseStore[]
+  creativeAssets  FranchiseCreative[]
+
+  @@index([ownerTenantId])
+  @@index([slug])
+  @@map("franchise_brands")
+}
+
+model FranchiseStore {
+  id              String   @id @default(uuid())
+
+  // Which brand this store belongs to
+  brandId         String
+  brand           FranchiseBrand @relation(fields: [brandId], references: [id])
+
+  // The store's own tenant (for data access, billing, usage)
+  tenantId        String   @unique
+  tenant          Tenant   @relation("FranchiseStore", fields: [tenantId], references: [id])
+
+  // Store details
+  storeNumber     String?  // e.g., "Store #1234"
+  storeName       String   // e.g., "McDonalds - Scottsdale Rd"
+
+  // Location (for radius-based data scoping)
+  address         String
+  city            String
+  state           String
+  zip             String
+  latitude        Float?
+  longitude       Float?
+
+  // Store-specific overrides
+  radiusMiles     Float?   // Override brand default
+
+  // Contact
+  managerName     String?
+  managerEmail    String?
+  managerPhone    String?
+
+  // Status
+  status          FranchiseStoreStatus @default(ACTIVE)
+
+  // Stats
+  totalSpend      Decimal  @default(0) @db.Decimal(10, 2)
+  totalCampaigns  Int      @default(0)
+  lastActivityAt  DateTime?
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([brandId])
+  @@index([tenantId])
+  @@index([status])
+  @@map("franchise_stores")
+}
+
+model FranchiseCreative {
+  id              String   @id @default(uuid())
+
+  // Which brand this creative belongs to
+  brandId         String
+  brand           FranchiseBrand @relation(fields: [brandId], references: [id])
+
+  // Creative details
+  name            String   // e.g., "Spring New Mover Welcome Postcard"
+  description     String?
+  type            FranchiseCreativeType
+  category        String?  // e.g., "seasonal", "new_mover", "retention"
+
+  // Content — links to Template model for postcards/emails
+  templateId      String?
+
+  // Or raw content for other types
+  htmlContent     String?  @db.Text
+  imageUrl        String?
+  thumbnailUrl    String?
+
+  // Merge fields available
+  mergeFields     String[] // e.g., ["store_name", "store_address", "manager_name", "first_name"]
+
+  // Approval status
+  isApproved      Boolean  @default(true)   // HQ-approved creative
+  isRequired      Boolean  @default(false)  // Stores must use this
+
+  // Scheduling
+  availableFrom   DateTime?
+  availableTo     DateTime?
+
+  // Status
+  isActive        Boolean  @default(true)
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([brandId])
+  @@index([type])
+  @@index([isActive])
+  @@map("franchise_creatives")
+}
+
+enum FranchiseBillingModel {
+  PER_STORE       // Each store has its own Stripe subscription
+  CONSOLIDATED    // Franchisor pays for all stores (Stripe Connect)
+  HYBRID          // Franchisor pays base, stores pay overages
+}
+
+enum FranchiseBrandStatus {
+  ACTIVE
+  SUSPENDED
+  CANCELLED
+  PENDING_SETUP
+}
+
+enum FranchiseStoreStatus {
+  ACTIVE
+  SUSPENDED
+  PENDING_SETUP
+  CLOSED
+}
+
+enum FranchiseCreativeType {
+  POSTCARD        // Direct mail postcard
+  EMAIL           // Email campaign template
+  LETTER          // Direct mail letter
+  BANNER          // Display ad
+  SOCIAL          // Social media creative
+  LANDING_PAGE    // Landing page template
 }

@@ -139,6 +139,22 @@ import {
   executeTrackCompetitor,
 } from './tools/swotspot/index.js';
 
+// Franchise & Dealer tools
+import {
+  registerFranchiseBrandTool,
+  executeRegisterFranchiseBrand,
+  setupFranchiseStoreTool,
+  executeSetupFranchiseStore,
+  uploadFranchiseCreativeTool,
+  executeUploadFranchiseCreative,
+  franchiseDashboardTool,
+  executeFranchiseDashboard,
+  listFranchiseCreativeTool,
+  executeListFranchiseCreative,
+  listFranchiseStoresTool,
+  executeListFranchiseStores,
+} from './tools/franchise/index.js';
+
 // Scheduler (Week 3 - updated)
 import { startScheduler, stopScheduler } from './cron/scheduler.js';
 
@@ -204,6 +220,13 @@ const TOOLS = [
   runLocalAuditTool,
   listAuditsTool,
   trackCompetitorTool,
+  // Franchise & Dealer tools
+  registerFranchiseBrandTool,
+  setupFranchiseStoreTool,
+  uploadFranchiseCreativeTool,
+  franchiseDashboardTool,
+  listFranchiseCreativeTool,
+  listFranchiseStoresTool,
 ];
 
 /**
@@ -262,6 +285,13 @@ const TOOL_EXECUTORS: Record<
   run_local_audit: executeRunLocalAudit,
   list_audits: executeListAudits,
   track_competitor: executeTrackCompetitor,
+  // Franchise & Dealer tools
+  register_franchise_brand: executeRegisterFranchiseBrand,
+  setup_franchise_store: executeSetupFranchiseStore,
+  upload_franchise_creative: executeUploadFranchiseCreative,
+  franchise_dashboard: executeFranchiseDashboard,
+  list_franchise_creative: executeListFranchiseCreative,
+  list_franchise_stores: executeListFranchiseStores,
 };
 
 /**
